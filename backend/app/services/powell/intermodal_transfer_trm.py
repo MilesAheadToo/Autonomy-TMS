@@ -45,8 +45,8 @@ with decision_type=INTERMODAL_TRANSFER.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -109,6 +109,56 @@ class IntermodalTransferTRM:
         self._model = ckpt
         return True
 
+    def _find_binding_deployment_requirement(
+        self, shipment: TMSShipment,
+    ):
+        """Look up the highest-priority active DeploymentRequirement
+        whose dest matches the shipment's destination AND whose
+        required_by falls within the shipment's delivery window.
+
+        Returns the canonical Core DR row or None when no DR exists.
+        Reads from the shared intersection table; works regardless of
+        which plane emitted the DR (for now SCP-only, but design
+        admits other emitters).
+
+        Lookup is intentionally coarse for v1:
+          * matches on dest_site_id (string-compared, since the
+            intersection table column is String(100) per AD-11)
+          * does NOT match on product_id (a shipment carries multiple
+            products via load_items; product-aware DR matching is
+            v2 scope)
+          * filters required_by between now and the shipment's
+            requested_delivery_date
+
+        When multiple DRs match, returns the one with the highest
+        priority integer (most urgent), then earliest required_by as
+        tiebreaker.
+        """
+        try:
+            from azirella_data_model.intersections.supply_transport import (
+                DeploymentRequirement,
+            )
+        except ImportError:
+            return None
+        if not shipment.destination_site_id:
+            return None
+        now = datetime.utcnow()
+        deadline = shipment.requested_delivery_date or (now + timedelta(days=30))
+        return self.db.execute(
+            select(DeploymentRequirement).where(
+                DeploymentRequirement.tenant_id == self.tenant_id,
+                DeploymentRequirement.dest_site_id == str(shipment.destination_site_id),
+                DeploymentRequirement.required_by >= now,
+                DeploymentRequirement.required_by <= deadline,
+                DeploymentRequirement.superseded_by.is_(None),
+            )
+            .order_by(
+                DeploymentRequirement.priority.desc(),
+                DeploymentRequirement.required_by.asc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
     def evaluate_shipment(
         self,
         shipment: TMSShipment,
@@ -125,6 +175,19 @@ class IntermodalTransferTRM:
                 in the absence of network data.
         """
         state = self._build_state(shipment, overrides or {})
+
+        # AD-11 cross-plane: look up SCP-emitted DeploymentRequirement
+        # for this shipment's destination. When found, the shadow-price
+        # vector adjusts the heuristic's intermodal_rate input — the
+        # extra transit days × required_qty × shadow_price_miss flows
+        # into the cost the heuristic compares against truck. This is
+        # how SCP's service-objective propagates into TMS's mode-shift
+        # decision.
+        binding_dr = self._find_binding_deployment_requirement(shipment)
+        spv_summary: Dict[str, Any] = {}
+        if binding_dr is not None:
+            state, spv_summary = self._apply_shadow_prices(state, binding_dr)
+
         decision = self._compute_decision("intermodal_transfer", state)
 
         action_name = {
@@ -159,7 +222,79 @@ class IntermodalTransferTRM:
             "reasoning": decision.reasoning,
             "decision_method": "trm_model" if self._model else "heuristic",
             "scoring_detail": decision.params_used,
+            "shadow_price_adjustment": spv_summary,  # AD-11 cross-plane signal
         }
+
+    def _apply_shadow_prices(self, state, binding_dr) -> Tuple[Any, Dict[str, Any]]:
+        """Adjust the intermodal_rate input to the heuristic to
+        incorporate the cost-of-miss implied by the binding DR.
+
+        Intermodal mode is typically slower than truck. When SCP has
+        issued a high-priority DeploymentRequirement for this
+        destination, the extra intermodal transit days carry a
+        miss-cost = ``qty × days × shadow_price_miss``. Folding that
+        cost into ``intermodal_rate`` makes the heuristic compare
+        truck-cost vs intermodal-cost-with-miss-penalty cleanly,
+        without modifying the heuristic itself.
+
+        Conversely, when intermodal is FASTER than truck (rare but
+        possible — air-intermodal etc.), the savings show up as an
+        earliness-bonus that REDUCES intermodal_rate.
+
+        Returns ``(adjusted_state, summary_dict)``. The summary dict
+        is attached to the result so observers can see why the
+        intermodal_rate moved (correlation_id, original rate, miss
+        adjustment, final rate).
+        """
+        import dataclasses
+        from azirella_data_model.intersections.supply_transport import (
+            ShadowPriceVector,
+            compute_earliness_bonus,
+            compute_miss_cost,
+        )
+
+        spv = ShadowPriceVector.from_requirement(binding_dr)
+        days_delta = state.intermodal_transit_days - state.truck_transit_days
+        adjustment = 0.0
+
+        if days_delta > 0:
+            # Intermodal is slower → miss-cost penalty
+            adjustment = compute_miss_cost(
+                spv,
+                qty=float(binding_dr.required_qty),
+                days_late=days_delta,
+            )
+            new_intermodal_rate = state.intermodal_rate + adjustment
+        elif days_delta < 0:
+            # Intermodal is faster → earliness bonus
+            bonus = compute_earliness_bonus(
+                spv,
+                qty=float(binding_dr.required_qty),
+                days_early=abs(days_delta),
+            )
+            adjustment = -bonus
+            new_intermodal_rate = max(0.0, state.intermodal_rate + adjustment)
+        else:
+            new_intermodal_rate = state.intermodal_rate
+
+        adjusted = dataclasses.replace(
+            state, intermodal_rate=new_intermodal_rate,
+        )
+        summary = {
+            "binding_dr_id": int(binding_dr.id),
+            "binding_dr_correlation_id": str(binding_dr.correlation_id),
+            "binding_dr_priority": int(binding_dr.priority),
+            "shadow_price_miss_per_unit_per_day": float(spv.miss_per_unit_per_day),
+            "shadow_price_earliness_per_unit_per_day": float(
+                spv.earliness_per_unit_per_day
+            ),
+            "required_qty": float(binding_dr.required_qty),
+            "transit_days_delta": float(days_delta),
+            "intermodal_rate_before": float(state.intermodal_rate),
+            "intermodal_rate_after": float(new_intermodal_rate),
+            "rate_adjustment": float(adjustment),
+        }
+        return adjusted, summary
 
     def evaluate_and_log(
         self,

@@ -48,7 +48,7 @@ the full decision path exercises.
 """
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.orm import Session
@@ -167,6 +167,18 @@ class BrokerRoutingTRM:
     def evaluate_load(self, load: Load) -> Optional[Dict[str, Any]]:
         """Evaluate broker-routing decision for one load. Never mutates."""
         state = self._build_state(load)
+
+        # AD-11 cross-plane: when SCP has issued a high-priority
+        # DeploymentRequirement for this load's destination, lift the
+        # DR's priority into shipment_priority + flip
+        # is_customer_committed and bump budget_remaining by the miss-
+        # cost (so the heuristic can take a more expensive broker
+        # when the alternative is missing the deadline).
+        binding_dr = self._find_binding_deployment_requirement(load)
+        spv_summary: Dict[str, Any] = {}
+        if binding_dr is not None:
+            state, spv_summary = self._apply_shadow_prices(state, binding_dr)
+
         decision = self._compute_decision("broker_routing", state)
 
         action_name = {
@@ -200,7 +212,101 @@ class BrokerRoutingTRM:
             "reasoning": decision.reasoning,
             "decision_method": "trm_model" if self._model else "heuristic",
             "scoring_detail": decision.params_used,
+            "shadow_price_adjustment": spv_summary,  # AD-11 cross-plane signal
         }
+
+    # ── AD-11 cross-plane: shadow-price-driven decisions ──────────
+
+    def _find_binding_deployment_requirement(self, load: Load):
+        """Highest-priority active DR matching load.destination_site_id.
+
+        A load arriving at site X helps satisfy any DR for X whose
+        required_by is approximately the load's arrival (on-time)
+        or somewhat after (the load contributes to a future-dated
+        requirement). The filter window is
+        ``[now, planned_arrival + 14 days]`` to capture both the
+        immediate deadline (this load is a direct response) and
+        upcoming ones (this load draws down the pipeline).
+
+        Returns the DeploymentRequirement row or None.
+        """
+        try:
+            from azirella_data_model.intersections.supply_transport import (
+                DeploymentRequirement,
+            )
+        except ImportError:
+            return None
+        if not load.destination_site_id:
+            return None
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.utcnow()
+        # Window stretches from now to 14 days past planned_arrival
+        # (or 28 days from now if arrival is unset). This admits DRs
+        # that the load helps satisfy even if their required_by is
+        # later than the load's arrival.
+        anchor = load.planned_arrival or (now + _td(days=14))
+        deadline = anchor + _td(days=14)
+        return self.db.execute(
+            select(DeploymentRequirement).where(
+                DeploymentRequirement.tenant_id == self.tenant_id,
+                DeploymentRequirement.dest_site_id == str(load.destination_site_id),
+                DeploymentRequirement.required_by >= now,
+                DeploymentRequirement.required_by <= deadline,
+                DeploymentRequirement.superseded_by.is_(None),
+            )
+            .order_by(
+                DeploymentRequirement.priority.desc(),
+                DeploymentRequirement.required_by.asc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
+    def _apply_shadow_prices(self, state, binding_dr) -> Tuple[Any, Dict[str, Any]]:
+        """Bump shipment_priority + is_customer_committed + budget_remaining
+        on the heuristic state, reflecting that SCP has bound a high-
+        priority requirement to this load's destination.
+
+        Effect on the heuristic: it tolerates higher broker premiums
+        (because the alternative — escalating and missing the
+        deadline — is more costly). The miss-cost is computed as a
+        24h penalty estimate (broker resolution typically resolves
+        within a day; longer windows would require multi-day
+        forecasting).
+        """
+        import dataclasses
+        from azirella_data_model.intersections.supply_transport import (
+            ShadowPriceVector, compute_miss_cost,
+        )
+
+        spv = ShadowPriceVector.from_requirement(binding_dr)
+        # 24h miss-cost on the binding requirement's quantity. This is
+        # the additional budget the heuristic should treat as available
+        # to clear the load (if escalation costs $X in miss penalty,
+        # paying $X more for a broker is breakeven).
+        miss_budget = compute_miss_cost(
+            spv,
+            qty=float(binding_dr.required_qty),
+            days_late=1.0,
+        )
+        adjusted = dataclasses.replace(
+            state,
+            shipment_priority=int(binding_dr.priority),
+            is_customer_committed=True,
+            budget_remaining=state.budget_remaining + miss_budget,
+        )
+        summary = {
+            "binding_dr_id": int(binding_dr.id),
+            "binding_dr_correlation_id": str(binding_dr.correlation_id),
+            "binding_dr_priority": int(binding_dr.priority),
+            "shadow_price_miss_per_unit_per_day": float(spv.miss_per_unit_per_day),
+            "required_qty": float(binding_dr.required_qty),
+            "miss_budget_24h": float(miss_budget),
+            "shipment_priority_before": int(state.shipment_priority),
+            "shipment_priority_after": int(binding_dr.priority),
+            "budget_remaining_before": float(state.budget_remaining),
+            "budget_remaining_after": float(state.budget_remaining + miss_budget),
+        }
+        return adjusted, summary
 
     def evaluate_and_log(self, load: Load) -> Optional[Dict[str, Any]]:
         """Evaluate + log at severity matching the action."""
