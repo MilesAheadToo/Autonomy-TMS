@@ -169,19 +169,63 @@ class LoadBuildTRM:
         state = self._build_state(
             shipments, origin_site_id, destination_site_id, mode
         )
+
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
+            4: "MODIFY", 5: "RETENDER", 6: "REROUTE",
+            7: "CONSOLIDATE", 8: "SPLIT",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "origin_site_id": origin_site_id,
+                    "destination_site_id": destination_site_id,
+                    "mode": mode,
+                    "pickup_date": pickup_date.isoformat() if pickup_date else None,
+                    "shipment_ids": [s.id for s in shipments],
+                    "shipment_count": len(shipments),
+                    "total_weight": state.total_weight,
+                    "total_volume": state.total_volume,
+                    "total_pallets": state.total_pallets,
+                    "weight_util_pct": 0.0,
+                    "volume_util_pct": 0.0,
+                    "stop_count": state.stop_count,
+                    "has_hazmat_conflict": state.has_hazmat_conflict,
+                    "has_temp_conflict": state.has_temp_conflict,
+                    "ftl_rate": state.ftl_rate,
+                    "ltl_rate_sum": state.ltl_rate_sum,
+                    "consolidation_savings": state.consolidation_savings,
+                    "optimal_mode": None,
+                    "total_savings": None,
+                    "action": action,
+                    "action_name": action_name,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "LoadBuild BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("load_build", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-            5: "RETENDER",
-            6: "REROUTE",
-            7: "CONSOLIDATE",
-            8: "SPLIT",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         scoring = decision.params_used or {}
 
@@ -210,7 +254,7 @@ class LoadBuildTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": scoring,
         }
 

@@ -142,18 +142,59 @@ class EquipmentRepositionTRM:
         state = self._build_state(
             source_site_id, target_site_id, equipment_type, overrides or {}
         )
-        decision = self._compute_decision("equipment_reposition", state)
 
         # Action space for this TRM: HOLD=10, REPOSITION=9 (Core constants).
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-            9: "REPOSITION",
-            10: "HOLD",
-        }.get(decision.action, "UNKNOWN")
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
+            4: "MODIFY", 9: "REPOSITION", 10: "HOLD",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "source_site_id": source_site_id,
+                    "target_site_id": target_site_id,
+                    "equipment_type": equipment_type,
+                    "source_equipment_count": state.source_equipment_count,
+                    "source_demand_next_7d": state.source_demand_next_7d,
+                    "target_equipment_count": state.target_equipment_count,
+                    "target_demand_next_7d": state.target_demand_next_7d,
+                    "source_surplus": state.source_surplus(),
+                    "target_deficit": state.target_deficit(),
+                    "reposition_miles": state.reposition_miles,
+                    "reposition_cost": state.reposition_cost,
+                    "cost_of_not_repositioning": state.cost_of_not_repositioning,
+                    "roi": state.reposition_roi(),
+                    "fleet_utilization_pct": state.fleet_utilization_pct,
+                    "proposed_quantity": 0,
+                    "action": action,
+                    "action_name": action_name,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "EquipmentReposition BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
+        decision = self._compute_decision("equipment_reposition", state)
+
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         proposed_qty = int(decision.quantity or 0)
 
@@ -178,7 +219,7 @@ class EquipmentRepositionTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
         }
 

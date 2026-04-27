@@ -133,15 +133,56 @@ class DockSchedulingTRM:
     def evaluate_appointment(self, appt: Appointment) -> Optional[Dict[str, Any]]:
         """Evaluate one appointment. Never mutates DB."""
         state = self._build_state(appt)
+
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE", 4: "MODIFY",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "appointment_id": appt.id,
+                    "site_id": appt.site_id,
+                    "appointment_type": state.appointment_type,
+                    "status": appt.status.value,
+                    "scheduled_start": (
+                        appt.scheduled_start.isoformat() if appt.scheduled_start else None
+                    ),
+                    "total_doors": state.total_dock_doors,
+                    "available_doors": state.available_dock_doors,
+                    "queue_depth": state.current_queue_depth,
+                    "utilization_pct": 0.0,
+                    "detention_risk": 0.0,
+                    "projected_detention_cost": 0.0,
+                    "action": action,
+                    "action_name": action_name,
+                    "recommendation": None,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "DockScheduling BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("dock_scheduling", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         scoring = decision.params_used or {}
         recommendation = scoring.get("recommendation")
@@ -168,7 +209,7 @@ class DockSchedulingTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": scoring,
         }
 

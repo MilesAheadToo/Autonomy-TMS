@@ -122,7 +122,48 @@ class FreightProcurementTRM:
             hours_to_tender_deadline=24.0,
         )
 
-        # Evaluate — model or heuristic
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                # BC model doesn't pick a carrier — fall back to the
+                # primary candidate (the contract carrier waterfall
+                # produces the same selection the heuristic would).
+                selected_carrier = candidates[0] if candidates else None
+                return {
+                    "load_id": load.id,
+                    "load_number": load.load_number,
+                    "carrier_id": selected_carrier["carrier_id"] if selected_carrier else None,
+                    "carrier_name": selected_carrier.get("carrier_name") if selected_carrier else None,
+                    "offered_rate": selected_carrier["rate"] if selected_carrier else 0,
+                    "action": action,
+                    "action_name": action_name,
+                    "composite_score": confidence,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "FreightProcurement BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("freight_procurement", state)
 
         # Find the selected carrier
@@ -140,12 +181,12 @@ class FreightProcurementTRM:
             "carrier_name": selected_carrier.get("carrier_name") if selected_carrier else None,
             "offered_rate": selected_carrier["rate"] if selected_carrier else 0,
             "action": decision.action,
-            "action_name": {0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE"}.get(decision.action, "UNKNOWN"),
+            "action_name": action_name_map.get(decision.action, "UNKNOWN"),
             "composite_score": decision.params_used.get("composite_score") if decision.params_used else None,
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
         }
 

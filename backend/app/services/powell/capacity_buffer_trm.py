@@ -135,15 +135,55 @@ class CapacityBufferTRM:
     def evaluate_target(self, target: CapacityTarget) -> Optional[Dict[str, Any]]:
         """Evaluate buffer-sizing decision for one CapacityTarget. Never mutates it."""
         state = self._build_state(target)
+
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE", 4: "MODIFY",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "target_id": target.id,
+                    "lane_id": target.lane_id,
+                    "mode": target.mode,
+                    "target_date": target.target_date.isoformat() if target.target_date else None,
+                    "period_type": target.period_type or "WEEK",
+                    "baseline_buffer_loads": int(state.baseline_buffer_loads),
+                    "proposed_buffer_loads": int(state.baseline_buffer_loads),
+                    "forecast_loads": int(state.forecast_loads),
+                    "committed_loads": int(state.committed_loads),
+                    "recent_tender_reject_rate": state.recent_tender_reject_rate,
+                    "recent_capacity_miss_count": state.recent_capacity_miss_count,
+                    "demand_cv": state.demand_cv,
+                    "demand_trend": state.demand_trend,
+                    "action": action,
+                    "action_name": action_name,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "CapacityBuffer BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("capacity_buffer", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         proposed_buffer = int(decision.quantity or state.baseline_buffer_loads)
 
@@ -166,7 +206,7 @@ class CapacityBufferTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
         }
 

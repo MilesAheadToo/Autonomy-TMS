@@ -118,15 +118,49 @@ class ShipmentTrackingTRM:
     def evaluate_load(self, load: Load) -> Optional[Dict[str, Any]]:
         """Evaluate tracking decision for one load. Never mutates the load."""
         state = self._build_state(load)
+
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE", 4: "MODIFY",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "load_id": load.id,
+                    "load_number": load.load_number,
+                    "load_status": load.status.value,
+                    "transport_mode": state.transport_mode,
+                    "pct_complete": state.pct_complete,
+                    "hours_late": 0.0,
+                    "last_update_hours_ago": state.last_update_hours_ago,
+                    "action": action,
+                    "action_name": action_name,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "ShipmentTracking BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("shipment_tracking", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         return {
             "load_id": load.id,
@@ -141,7 +175,7 @@ class ShipmentTrackingTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
         }
 

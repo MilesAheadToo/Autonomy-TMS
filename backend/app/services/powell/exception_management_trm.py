@@ -124,17 +124,58 @@ class ExceptionManagementTRM:
     def evaluate_exception(self, exc: ShipmentException) -> Optional[Dict[str, Any]]:
         """Evaluate one exception. Never mutates DB."""
         state = self._build_state(exc)
+
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
+            4: "MODIFY", 5: "RETENDER", 6: "REROUTE",
+        }
+
+        l2_multiplier = self._l2_urgency_multiplier(exc)
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                baseline_urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                modulated_urgency = max(
+                    0.0, min(1.0, baseline_urgency * l2_multiplier),
+                )
+                return {
+                    "exception_id": exc.id,
+                    "shipment_id": exc.shipment_id,
+                    "exception_type": state.exception_type,
+                    "severity": state.severity,
+                    "resolution_status": exc.resolution_status.value,
+                    "estimated_delay_hrs": state.estimated_delay_hrs,
+                    "delivery_window_hrs": state.delivery_window_remaining_hrs,
+                    "action": action,
+                    "action_name": action_name,
+                    "priority_score": None,
+                    "confidence": confidence,
+                    "urgency": modulated_urgency,
+                    "baseline_urgency": baseline_urgency,
+                    "l2_urgency_multiplier": l2_multiplier,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "ExceptionManagement BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("exception_management", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-            5: "RETENDER",
-            6: "REROUTE",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         # L2 Terminal Coordinator urgency modulation. Falls back to
         # 1.0 (neutral) when no override exists at this exception's
@@ -142,7 +183,6 @@ class ExceptionManagementTRM:
         # canonical "where the work is happening" hub for an
         # in-flight exception.
         baseline_urgency = float(decision.urgency)
-        l2_multiplier = self._l2_urgency_multiplier(exc)
         modulated_urgency = max(0.0, min(1.0, baseline_urgency * l2_multiplier))
 
         return {
@@ -164,7 +204,7 @@ class ExceptionManagementTRM:
             "baseline_urgency": baseline_urgency,
             "l2_urgency_multiplier": l2_multiplier,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
         }
 

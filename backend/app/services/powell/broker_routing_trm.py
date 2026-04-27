@@ -179,14 +179,52 @@ class BrokerRoutingTRM:
         if binding_dr is not None:
             state, spv_summary = self._apply_shadow_prices(state, binding_dr)
 
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "load_id": load.id,
+                    "load_number": load.load_number,
+                    "load_status": load.status.value,
+                    "tender_attempts_exhausted": state.tender_attempts_exhausted,
+                    "all_contract_carriers_declined": state.all_contract_carriers_declined,
+                    "hours_to_pickup": state.hours_to_pickup,
+                    "brokers_available": len(state.available_brokers),
+                    "action": action,
+                    "action_name": action_name,
+                    "selected_broker_id": None,
+                    "selected_broker_name": None,
+                    "selected_rate": 0.0,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                    "shadow_price_adjustment": spv_summary,
+                }
+            except Exception as e:
+                logger.warning(
+                    "BrokerRouting BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("broker_routing", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         selected_broker_id = None
         selected_broker_name = None
@@ -210,7 +248,7 @@ class BrokerRoutingTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
             "shadow_price_adjustment": spv_summary,  # AD-11 cross-plane signal
         }

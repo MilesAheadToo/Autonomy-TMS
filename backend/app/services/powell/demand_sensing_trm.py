@@ -125,15 +125,54 @@ class DemandSensingTRM:
     def evaluate_forecast(self, forecast: ShippingForecast) -> Optional[Dict[str, Any]]:
         """Evaluate demand-sensing decision for one forecast. Never mutates it."""
         state = self._build_state(forecast)
+
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE", 4: "MODIFY",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "forecast_id": forecast.id,
+                    "lane_id": forecast.lane_id,
+                    "forecast_date": forecast.forecast_date.isoformat() if forecast.forecast_date else None,
+                    "period_type": forecast.period_type or "WEEK",
+                    "mode": forecast.mode,
+                    "forecast_loads": float(state.forecast_loads),
+                    "proposed_adjustment": 0.0,
+                    "proposed_forecast": float(state.forecast_loads),
+                    "week_over_week_change_pct": state.week_over_week_change_pct,
+                    "pipeline_velocity_24h": state.order_pipeline_loads_24h,
+                    "pipeline_velocity_prior_24h": state.order_pipeline_loads_prior_24h,
+                    "forecast_mape": state.forecast_mape,
+                    "action": action,
+                    "action_name": action_name,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                }
+            except Exception as e:
+                logger.warning(
+                    "DemandSensing BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("demand_sensing", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         # MODIFY carries the proposed ΔQty. Convert to absolute target for
         # convenience when surfaced to humans.
@@ -160,7 +199,7 @@ class DemandSensingTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
         }
 

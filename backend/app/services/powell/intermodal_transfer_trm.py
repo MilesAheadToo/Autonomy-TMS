@@ -188,15 +188,58 @@ class IntermodalTransferTRM:
         if binding_dr is not None:
             state, spv_summary = self._apply_shadow_prices(state, binding_dr)
 
+        action_name_map = {
+            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE", 4: "MODIFY",
+        }
+
+        if self._model is not None:
+            from app.services.powell.bc_checkpoint_loader import predict_action
+            try:
+                action, confidence, probs = predict_action(self._model, state)
+                action_name = action_name_map.get(action, "UNKNOWN")
+                urgency = (
+                    confidence if action != 0 else max(0.0, 1.0 - confidence)
+                )
+                return {
+                    "shipment_id": shipment.id,
+                    "shipment_number": shipment.shipment_number,
+                    "current_mode": state.current_mode,
+                    "candidate_mode": state.candidate_mode,
+                    "truck_rate": state.truck_rate,
+                    "intermodal_rate": state.intermodal_rate,
+                    "total_truck_miles": state.total_truck_miles,
+                    "origin_ramp_distance_miles": state.origin_ramp_distance_miles,
+                    "dest_ramp_distance_miles": state.dest_ramp_distance_miles,
+                    "truck_transit_days": state.truck_transit_days,
+                    "intermodal_transit_days": state.intermodal_transit_days,
+                    "delivery_window_days": state.delivery_window_days,
+                    "cost_savings_pct": state.cost_savings_pct(),
+                    "transit_penalty_days": state.transit_time_penalty_days(),
+                    "is_hazmat": state.is_hazmat,
+                    "is_temperature_controlled": state.is_temperature_controlled,
+                    "action": action,
+                    "action_name": action_name,
+                    "confidence": confidence,
+                    "urgency": urgency,
+                    "reasoning": (
+                        f"BC model predicted {action_name} (p={confidence:.3f})"
+                    ),
+                    "decision_method": "trm_model",
+                    "scoring_detail": {
+                        "model_probs": probs,
+                        "model_val_acc": self._model.best_val_acc,
+                    },
+                    "shadow_price_adjustment": spv_summary,
+                }
+            except Exception as e:
+                logger.warning(
+                    "IntermodalTransfer BC inference failed (falling back "
+                    "to heuristic): %s", e,
+                )
+
         decision = self._compute_decision("intermodal_transfer", state)
 
-        action_name = {
-            0: "ACCEPT",
-            1: "REJECT",
-            2: "DEFER",
-            3: "ESCALATE",
-            4: "MODIFY",
-        }.get(decision.action, "UNKNOWN")
+        action_name = action_name_map.get(decision.action, "UNKNOWN")
 
         return {
             "shipment_id": shipment.id,
@@ -220,7 +263,7 @@ class IntermodalTransferTRM:
             "confidence": decision.confidence,
             "urgency": decision.urgency,
             "reasoning": decision.reasoning,
-            "decision_method": "trm_model" if self._model else "heuristic",
+            "decision_method": "heuristic",
             "scoring_detail": decision.params_used,
             "shadow_price_adjustment": spv_summary,  # AD-11 cross-plane signal
         }
