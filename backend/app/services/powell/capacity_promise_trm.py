@@ -250,6 +250,19 @@ class CapacityPromiseTRM:
         # Default priority 3 if the Load doesn't carry one.
         priority = int(getattr(load, "priority", 3) or 3)
 
+        # Cross-plane signal: read SCP-issued DeploymentRequirement
+        # rows that pertain to this load's destination over the next
+        # ~7 days. Any upward forecast adjustment in SCP shows up here
+        # as future load pressure on the same lane endpoint. Helper
+        # no-ops at Tier 0a (SCP not registered), so SCP-less TMS
+        # deployments degrade cleanly to forecast_loads=0.
+        forecast_loads, scp_priority_lift = self._scp_demand_signal(load)
+        if scp_priority_lift is not None and scp_priority_lift < priority:
+            # SCP requirement carries a higher priority than the load's
+            # default — lift the load's priority so the heuristic /
+            # TRM scoring weights this load accordingly.
+            priority = scp_priority_lift
+
         return self._StateClass(
             shipment_id=load.id,
             lane_id=0,
@@ -260,7 +273,7 @@ class CapacityPromiseTRM:
             committed_capacity=booked,
             total_capacity=total_capacity or 0,
             buffer_capacity=0,
-            forecast_loads=0,
+            forecast_loads=forecast_loads,
             booked_loads=booked,
             primary_carrier_available=primary_available,
             backup_carriers_count=backup_count,
@@ -270,3 +283,58 @@ class CapacityPromiseTRM:
             primary_carrier_otp=self.DEFAULT_PRIMARY_OTP,
             allocation_compliance_pct=self.DEFAULT_ALLOCATION_COMPLIANCE,
         )
+
+    def _scp_demand_signal(self, load: Load) -> tuple[int, Optional[int]]:
+        """Read SCP-issued DeploymentRequirement rows relevant to this
+        load and return (forecast_loads_count, max_priority_seen).
+
+        Filters to rows whose ``dest_site_id`` matches the load's
+        destination and whose ``required_by`` falls within ±7 days of
+        the load's planned_departure. Each matching row counts as one
+        forecast load on this lane — a proxy for the SCP-side demand
+        pressure the carrier should size capacity around.
+
+        Returns ``(0, None)`` when SCP isn't registered (Tier 0a) or
+        when the load lacks a destination / planned_departure.
+        """
+        if not load.destination_site_id or not load.planned_departure:
+            return (0, None)
+        try:
+            from datetime import timedelta as _td
+            from azirella_data_model.intersections.supply_transport import (
+                consume_deployment_requirements_if_live,
+            )
+            window_start = load.planned_departure - _td(days=7)
+            rows = consume_deployment_requirements_if_live(
+                self.db,
+                tenant_id=self.tenant_id,
+                # Leave config_id unset so the SUPPLY-plane registry
+                # check matches the common tenant-wildcard
+                # registration (PlaneRegistry._active_row uses exact
+                # config_id matching, no wildcard fallback).
+                since=window_start,
+                limit=200,
+            )
+            if not rows:
+                return (0, None)
+            window_end = load.planned_departure + _td(days=7)
+            dest_match = str(load.destination_site_id)
+            count = 0
+            best_priority: Optional[int] = None
+            for r in rows:
+                # Filter on destination site + window. The contract
+                # column is String(100); compare by string to avoid
+                # int/string mismatches between SCP and TMS.
+                if str(r.dest_site_id) != dest_match:
+                    continue
+                rby = r.required_by
+                if rby is not None and (rby < window_start or rby > window_end):
+                    continue
+                count += 1
+                p = int(getattr(r, "priority", 5) or 5)
+                if best_priority is None or p < best_priority:
+                    best_priority = p
+            return (count, best_priority)
+        except Exception as exc:
+            logger.debug("SCP deployment-requirement read skipped: %s", exc)
+            return (0, None)
