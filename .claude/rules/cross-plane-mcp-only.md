@@ -97,6 +97,33 @@ get_realized_shipments(
 
 **What this means for TMS work:** any new code that needs cross-plane *commit* (not just *read*) lands in §3.8.3 territory. Add the right tool symmetric on both sides; don't fake it with a one-direction call.
 
+## Plane-absence fallback semantics — every cross-plane MCP call must declare one
+
+**Customers do not always deploy both planes.** A pure transport 3PL runs TMS with no SCP. A planning-only customer runs SCP and routes transport through external tooling. An integrated customer runs both. Every cross-plane MCP call in TMS must therefore work in all three deployments — degraded gracefully when the peer plane is absent, never crashing or silently corrupting state.
+
+**The contract:**
+
+When TMS code calls a peer-plane MCP tool, the caller MUST handle three failure modes and document the fallback:
+
+1. **Peer plane not registered** — the plane registry returns no entry for the peer. Probable cause: customer hasn't deployed it. **Fallback:** drop into solo-mode behavior (defined per call site). Log at INFO level (operational, not error).
+2. **Peer plane unreachable** — registry has an entry but the endpoint times out / refuses connection. Probable cause: peer is deployed but down. **Fallback:** same solo-mode behavior. Log at WARN level (operational issue worth noticing).
+3. **Peer plane returns an error** — the call connects but the tool returns an error response, schema mismatch, or empty result. Probable cause: peer is deployed but the data SCP wants doesn't exist for this tenant/config. **Fallback:** call-site-specific (sometimes solo-mode, sometimes raise). Log at WARN level with the peer's error body.
+
+**Rules of thumb for picking the fallback:**
+
+- **Read calls** (e.g. SCP→TMS `get_carrier_capacity` to check capacity before ATP-promise): solo-mode = the current pre-MCP behavior. SCP today doesn't check TMS capacity before promising, so solo-mode = optimistic ATP. The fallback should match what SCP would do if TMS's MCP didn't exist at all.
+- **Feedback calls** (e.g. SCP←TMS `get_realized_shipments` for forecast retraining): solo-mode = forecast retrains from training corpus only, no live-shipment learning loop. Mark forecast quality metrics as "no realised-outcome feedback available" so the user knows.
+- **Write calls** (e.g. intersection-contract `request_deployment_requirement`): solo-mode = the writer plane logs the requirement locally only and proceeds with its own plan. Do NOT pretend the commit was confirmed.
+
+**Anti-patterns:**
+
+- Silent degradation. If a cross-plane call fails, the calling code must log it. The customer's ops team has to know cross-plane integration is degraded — otherwise they won't notice that SCP forecasts are running blind for two weeks.
+- "Pretend the call succeeded" defaults. Returning an empty list when the peer is absent looks identical to "peer returned no rows." Use sentinel values or explicit absence markers.
+- Hard-coded peer URLs as fallback. The plane registry is the resolution mechanism. If the registry says peer is absent, that's the answer; don't second-guess via a fallback URL.
+- "We'll add the fallback later." Each MCP call ships **with** its fallback. No fallback = the call is not production-ready.
+
+**For tooling: the rule applies symmetrically to TMS-as-callee.** When SCP calls a TMS MCP tool and TMS isn't deployed, SCP's calling code is what falls back — but TMS's own tool design should still be tolerant of unusual inputs (empty tenants, no rows, partial config) and return clean typed-empty responses rather than 500 errors. Tools in `app/mcp_server/tools/*` should be treated as part of TMS's external API surface.
+
 ## Smaller hygiene flags
 
 Audit also surfaced (track in §3.8 hygiene rollup):
