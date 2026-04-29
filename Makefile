@@ -39,7 +39,19 @@ ifeq ($(FORCE_GPU),1)
     COMPOSE_FILES += -f docker-compose.gpu.yml
     BACKEND_BUILD_ARGS := $(DOCKER_BUILD_ARGS_GPU)
 endif
-    
+
+# SCP_COLOCATED=1 opts in to the SCP co-located overlay (joins SCP's external
+# Docker network so TMS can reach autonomy-scp-db). Only valid on a host that
+# also runs the SCP stack (e.g. msi-stealth). Off-host, leave unset.
+# `SCP_OVERLAY` is exposed as a separate variable so dev / proxy targets that
+# build their own compose-file lists can append it without re-deriving the
+# gate. See docker-compose.scp-colocated.yml header for the full opt-in story.
+SCP_OVERLAY :=
+ifeq ($(SCP_COLOCATED),1)
+    COMPOSE_FILES += -f docker-compose.scp-colocated.yml
+    SCP_OVERLAY := -f docker-compose.scp-colocated.yml
+endif
+
 COMPOSE_CMD = $(DOCKER_COMPOSE_CMD) $(COMPOSE_FILES)
 
 # Default configuration name and training parameters (overridable via environment)
@@ -144,15 +156,15 @@ gpu-up:
 up-dev:
 	@echo "\n[+] Building and starting full system with dev overrides (proxy, frontend, backend, db)..."; \
 	echo "   Build type: CPU (default)"; \
-	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml build $(DOCKER_BUILD_ARGS) backend && \
-	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml up -d proxy frontend backend db create-users; \
+	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) build $(DOCKER_BUILD_ARGS) backend && \
+	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) up -d proxy frontend backend db create-users; \
 	echo "\n[✓] Local development server started with dev overrides (CPU mode)."; \
 	echo "   URL:     http://$(HOST):$(PROXY_HOST_PORT)"; \
 	echo "   SystemAdmin: systemadmin@autonomy.ai / Autonomy@2026"
 
 up-remote:
 	@echo "\n[+] Building and starting full system for remote access..."; \
-	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml up -d --build proxy frontend backend db create-users; \
+	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) up -d --build proxy frontend backend db create-users; \
 	echo "\n[✓] Remote server started."; \
 	echo "   URL:     http://$(REMOTE_HOST):$(PROXY_HOST_PORT)"; \
 	echo "   SystemAdmin: systemadmin@autonomy.ai / Autonomy@2026"; \
@@ -188,8 +200,8 @@ rebuild-frontend:
 		exit 1; \
 	fi; \
 	echo "\n[+] Rebuilding frontend image with BuildKit secret..."; \
-	DOCKER_BUILDKIT=1 $(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml build frontend; \
-	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml up -d frontend; \
+	DOCKER_BUILDKIT=1 $(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) build frontend; \
+	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) up -d frontend; \
 	$(MAKE) --no-print-directory proxy-restart; \
 	echo "\n[✓] Frontend rebuilt and restarted."
 
@@ -203,8 +215,8 @@ rebuild-backend:
 	fi; \
 	echo "\n[+] Rebuilding backend image with BuildKit secret..."; \
 	echo "   Build type: $(if $(filter 1,$(FORCE_GPU)),GPU,CPU)"; \
-	DOCKER_BUILDKIT=1 $(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml build $(DOCKER_BUILD_ARGS) backend; \
-	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml up -d backend; \
+	DOCKER_BUILDKIT=1 $(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) build $(DOCKER_BUILD_ARGS) backend; \
+	$(DOCKER_COMPOSE_CMD) -f docker-compose.yml -f docker-compose.dev.yml $(SCP_OVERLAY) up -d backend; \
 	echo "\n[✓] Backend rebuilt and restarted."
 
 # GPU-specific targets

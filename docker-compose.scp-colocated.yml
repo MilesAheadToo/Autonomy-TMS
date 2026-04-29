@@ -1,15 +1,27 @@
-# TMS dev override — joins SCP's network and configures the SCP read connection.
+# TMS ↔ SCP co-located overlay — joins SCP's network and configures the SCP read
+# connection. **Opt-in. Not auto-loaded by Compose.**
 #
-# This file is per Trevor's setup on 2026-04-14 (SCP DBA created `tms_reader` role
-# and SCP exposes `autonomy-scp-db` service on the `autonomy-scp_autonomy-network`
-# external Docker network).
+# Background: this used to live as `docker-compose.override.yml`, which Compose
+# auto-loads on every bare `docker compose ...` call. That broke every host
+# without SCP running locally — the external network `autonomy-scp_autonomy-
+# network` doesn't exist there, so even `docker compose ps` errored out.
+# Renamed 2026-04-29 so it's only applied when explicitly requested.
 #
-# IMPORTANT: This override only works when TMS runs on the SAME Docker host as SCP
-# (e.g., both stacks on msi-stealth). Docker external networks don't span hosts.
+# When to use this overlay:
+#   - Only on a host that runs BOTH the SCP and TMS stacks (e.g. msi-stealth).
+#   - Docker external networks don't span hosts; on any other host this overlay
+#     will fail with `network ... declared as external, but could not be found`.
 #
-# If running TMS on a different host than SCP, comment out the `networks` block
-# below and instead set SCP_DB_URL to a TCP URL pointing at SCP's host-exposed
-# Postgres port (requires SCP to publish 5432 in its compose, e.g. "5433:5432"):
+# How to opt in:
+#   - Via the Makefile: `make up SCP_COLOCATED=1` (or `export SCP_COLOCATED=1`
+#     once in your shell to apply to every target that uses $(COMPOSE_FILES)).
+#   - Direct compose: `docker compose -f docker-compose.yml \
+#       -f docker-compose.scp-colocated.yml up -d`. Add `-f docker-compose.dev.yml`
+#     between them to combine with dev mode.
+#
+# Alternative when running TMS on a different host than SCP: don't use this
+# overlay. Set SCP_DB_URL to a TCP URL pointing at SCP's host-exposed Postgres
+# port (requires SCP to publish 5432 in its compose, e.g. "5433:5432"):
 #
 #   SCP_DB_URL: postgresql+psycopg2://tms_reader:tms_reader_dev@msi-stealth.local:5433/autonomy
 
