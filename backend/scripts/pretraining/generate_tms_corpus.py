@@ -65,6 +65,7 @@ from azirella_data_model.powell.tms.heuristic_library.base import (
     LoadBuildState,
     IntermodalTransferState,
     EquipmentRepositionState,
+    LaneVolumeForecastState,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -336,6 +337,154 @@ def _sample_equipment_reposition(rng: random.Random) -> EquipmentRepositionState
     )
 
 
+def _sample_lane_volume_forecast(rng: random.Random) -> LaneVolumeForecastState:
+    """Sample a customer-facing lane's forecast-orchestration state.
+
+    Distribution covers the full Syntetos-Boylan space (smooth, erratic,
+    intermittent, lumpy) plus NEW (cold-start) and DECLINING (taper) lanes,
+    weighted toward smooth/erratic which dominate real shipper outbound
+    traffic. Recent forecast-performance fields (MAPE, conformal coverage,
+    interval width) are sampled to exercise all four heuristic actions
+    (ACCEPT / MODIFY / ESCALATE / DEFER).
+    """
+    # 1) Pick a demand archetype to sample around.
+    archetype = rng.choices(
+        ["smooth", "erratic", "intermittent", "lumpy", "new", "declining"],
+        weights=[40, 20, 12, 10, 12, 6],
+    )[0]
+
+    # Defaults; overridden per archetype below.
+    weeks = rng.randint(8, 156)
+    mean_d = rng.uniform(5.0, 60.0)
+    std_d = mean_d * rng.uniform(0.05, 0.40)
+    adi = 1.0
+    cv2 = 0.05
+    nonzero = 1.0
+    trend = rng.uniform(-0.02, 0.04)
+    seasonal = rng.uniform(0.0, 0.6)
+    last_actual = max(0.0, rng.gauss(mean_d, std_d))
+
+    if archetype == "smooth":
+        adi = rng.uniform(1.00, 1.25)
+        cv2 = rng.uniform(0.02, 0.40)
+        nonzero = rng.uniform(0.85, 1.0)
+    elif archetype == "erratic":
+        adi = rng.uniform(1.00, 1.30)
+        cv2 = rng.uniform(0.50, 1.50)
+        nonzero = rng.uniform(0.70, 0.95)
+        std_d = mean_d * rng.uniform(0.40, 0.90)
+    elif archetype == "intermittent":
+        adi = rng.uniform(1.40, 3.50)
+        cv2 = rng.uniform(0.05, 0.45)
+        nonzero = rng.uniform(0.30, 0.65)
+        std_d = mean_d * rng.uniform(0.10, 0.30)
+    elif archetype == "lumpy":
+        adi = rng.uniform(1.40, 4.00)
+        cv2 = rng.uniform(0.55, 2.00)
+        nonzero = rng.uniform(0.20, 0.55)
+        std_d = mean_d * rng.uniform(0.50, 1.20)
+    elif archetype == "new":
+        weeks = rng.randint(0, 9)              # < 8 = NEW; allow 0-3 → DEFER
+        adi = rng.uniform(1.00, 1.50)
+        cv2 = rng.uniform(0.10, 0.80)
+        nonzero = rng.uniform(0.50, 1.0)
+        last_actual = max(0.0, rng.gauss(mean_d, std_d))
+    elif archetype == "declining":
+        # Persistent negative trend + recent actual << mean
+        weeks = rng.randint(20, 100)
+        adi = rng.uniform(1.00, 1.30)
+        cv2 = rng.uniform(0.05, 0.40)
+        nonzero = rng.uniform(0.70, 1.0)
+        trend = rng.uniform(-0.20, -0.06)
+        last_actual = mean_d * rng.uniform(0.10, 0.45)
+
+    # 2) Recent forecast performance (varies by archetype; lumpy/intermittent
+    #    have systematically wider intervals and worse MAPE).
+    if archetype in ("smooth", "erratic"):
+        trailing_mape = rng.uniform(0.05, 0.35)
+        coverage = rng.uniform(0.70, 0.92)
+        interval_width = rng.uniform(0.15, 0.80)
+    elif archetype in ("intermittent", "lumpy"):
+        trailing_mape = rng.uniform(0.20, 0.70)
+        coverage = rng.uniform(0.55, 0.85)
+        interval_width = rng.uniform(0.40, 2.50)
+    else:  # new, declining
+        trailing_mape = rng.uniform(0.15, 0.80)
+        coverage = rng.uniform(0.45, 0.85)
+        interval_width = rng.uniform(0.30, 1.80)
+
+    # Occasionally inject a calibration drift (forces ESCALATE on coverage)
+    if rng.random() < 0.05:
+        coverage = rng.uniform(0.30, 0.55)
+
+    # 3) Proposed forecast: roughly track recent actual with method-specific noise.
+    p50 = max(0.5, last_actual * rng.uniform(0.85, 1.15) if last_actual > 0 else mean_d)
+    half_width = p50 * interval_width / 2.0
+    p10 = max(0.0, p50 - half_width)
+    p90 = p50 + half_width
+
+    # 4) Covariate availability — only smooth/erratic lanes typically have
+    #    rate / market signals joined; intermittent lanes rarely do.
+    has_rate = (archetype in ("smooth", "erratic")) and rng.random() < 0.55
+    has_market = (archetype in ("smooth", "erratic")) and rng.random() < 0.40
+
+    # 5) External signal overlay (sparse; mostly absent).
+    if rng.random() < 0.18:
+        signal_type = rng.choice(["PROMO_LIFT", "EVENT", "MARKET_SHIFT", "NPI", "EOL"])
+        signal_magnitude = rng.uniform(0.05, 0.40) * (1 if rng.random() > 0.25 else -1)
+        signal_confidence = rng.uniform(0.40, 0.95)
+    else:
+        signal_type = ""
+        signal_magnitude = 0.0
+        signal_confidence = 0.0
+
+    # 6) Recommended method label — used only as a hint; the heuristic
+    #    re-derives it inside compute_tms_decision.
+    if archetype == "new":
+        method = "AutoETS_coldstart"
+    elif archetype == "declining":
+        method = "TSB"
+    elif archetype == "intermittent":
+        method = "Croston"
+    elif archetype == "lumpy":
+        method = "TSB"
+    elif has_rate or has_market:
+        method = "LightGBM"
+    else:
+        method = "HoltWinters"
+
+    return LaneVolumeForecastState(
+        lane_id=rng.randint(1, 50),
+        period_days=7,
+        weeks_of_history=weeks,
+        mean_demand=mean_d,
+        demand_std=std_d,
+        avg_demand_interval=adi,
+        squared_cv=cv2,
+        nonzero_period_pct=nonzero,
+        trend_slope=trend,
+        seasonal_strength=seasonal,
+        is_peak_season=rng.random() < 0.25,
+        forecast_method_in_use=method if weeks >= 8 else "",
+        trailing_mape=trailing_mape,
+        trailing_wape=trailing_mape * rng.uniform(0.85, 1.15),
+        forecast_bias=rng.gauss(0.0, 0.10),
+        conformal_coverage_p80=coverage,
+        has_rate_covariate=has_rate,
+        has_market_signal=has_market,
+        has_calendar_features=True,
+        signal_type=signal_type,
+        signal_magnitude=signal_magnitude,
+        signal_confidence=signal_confidence,
+        proposed_forecast_p50=p50,
+        proposed_forecast_p10=p10,
+        proposed_forecast_p90=p90,
+        proposed_method=method,
+        last_period_actual=last_actual,
+        forecast_interval_width_pct=interval_width,
+    )
+
+
 SAMPLERS = {
     "capacity_promise": (_sample_capacity_promise, CapacityPromiseState),
     "shipment_tracking": (_sample_shipment_tracking, ShipmentTrackingState),
@@ -348,6 +497,7 @@ SAMPLERS = {
     "load_build": (_sample_load_build, LoadBuildState),
     "intermodal_transfer": (_sample_intermodal_transfer, IntermodalTransferState),
     "equipment_reposition": (_sample_equipment_reposition, EquipmentRepositionState),
+    "lane_volume_forecast": (_sample_lane_volume_forecast, LaneVolumeForecastState),
 }
 
 ALL_TRMS = list(SAMPLERS.keys())
@@ -474,6 +624,39 @@ def _add_derived_features(row: Dict[str, Any], state: Any, trm_type: str) -> Non
             row["derived_spot_premium_vs_benchmark"] = (state.spot_rate - benchmark) / benchmark
         else:
             row["derived_spot_premium_vs_benchmark"] = 0.0
+
+    elif trm_type == "lane_volume_forecast":
+        # Make Syntetos-Boylan class boundaries explicit so the BC MLP
+        # doesn't have to rediscover them from ADI/CV² alone.
+        adi = max(1.0, state.avg_demand_interval)
+        cv2 = max(0.0, state.squared_cv)
+        is_new = state.weeks_of_history < 8
+        is_declining = (
+            state.trend_slope < -0.05
+            and state.mean_demand > 0
+            and state.last_period_actual < state.mean_demand * 0.5
+            and not is_new
+        )
+        is_smooth = not is_new and not is_declining and adi < 1.32 and cv2 < 0.49
+        is_erratic = not is_new and not is_declining and adi < 1.32 and cv2 >= 0.49
+        is_intermittent = not is_new and not is_declining and adi >= 1.32 and cv2 < 0.49
+        is_lumpy = not is_new and not is_declining and adi >= 1.32 and cv2 >= 0.49
+        row["derived_is_new"] = 1.0 if is_new else 0.0
+        row["derived_is_declining"] = 1.0 if is_declining else 0.0
+        row["derived_is_smooth"] = 1.0 if is_smooth else 0.0
+        row["derived_is_erratic"] = 1.0 if is_erratic else 0.0
+        row["derived_is_intermittent"] = 1.0 if is_intermittent else 0.0
+        row["derived_is_lumpy"] = 1.0 if is_lumpy else 0.0
+        # Volatility composite — helps the MLP learn the wide-interval ESCALATE branch
+        row["derived_volatility"] = adi * cv2
+        # Has-any-covariate flag for the LightGBM eligibility branch
+        row["derived_has_any_covariate"] = 1.0 if (state.has_rate_covariate or state.has_market_signal) else 0.0
+        # Has-active-signal flag for the MODIFY signal-overlay branch
+        row["derived_has_active_signal"] = 1.0 if (
+            state.signal_type and state.signal_magnitude != 0 and state.signal_confidence > 0.5
+        ) else 0.0
+        # Peak-season precaution composite
+        row["derived_peak_season_mape"] = (1.0 if state.is_peak_season else 0.0) * state.trailing_mape
 
 
 def generate_corpus(

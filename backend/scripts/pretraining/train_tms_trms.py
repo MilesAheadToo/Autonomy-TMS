@@ -57,6 +57,7 @@ ALL_TRMS = [
     "capacity_buffer", "exception_management", "freight_procurement",
     "broker_routing", "dock_scheduling", "load_build",
     "intermodal_transfer", "equipment_reposition",
+    "lane_volume_forecast",   # 12th — Execution-tier lane-volume orchestrator
 ]
 
 

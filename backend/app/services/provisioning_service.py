@@ -38,10 +38,17 @@ logger = logging.getLogger(__name__)
 # Training steps that run in the background (fire-and-forget pattern).
 # run_step marks these "running" immediately; the background task updates to
 # "completed"/"failed" when the real work finishes.
+#
+# Note: legacy `trm_training` and `rl_training` are intentionally absent.
+# Generic TRM weights are now trained OFFLINE and shipped in the Docker
+# image at /app/models/pretrained/trm_base_v1/. The new step
+# `trm_load_pretrained` copies them into the tenant scope (no gradient
+# descent, completes in seconds). The legacy step methods remain only as
+# skip-stubs so old DB rows referencing them don't crash run_step.
 _BACKGROUND_STEPS = {
     "sop_graphsage",
     "supply_tgnn", "inventory_tgnn", "capacity_tgnn",
-    "trm_training", "rl_training", "site_tgnn", "scenario_bootstrap",
+    "trm_load_pretrained", "site_tgnn", "scenario_bootstrap",
 }
 
 
@@ -1506,37 +1513,198 @@ class ProvisioningService:
 
         return result
 
-    async def _step_trm_training(self, config_id: int) -> dict:
-        """Step 5: TRM Phase 1 BC (foreground fallback, normally runs via _bg).
+    async def _step_trm_load_pretrained(self, config_id: int) -> dict:
+        """Load pre-trained TMS TRM checkpoints from disk.
 
-        Post-condition: at least 1 checkpoint file must be produced.
-        Reports 'failed' if zero models trained (SOC II: no silent failures).
+        TRM weights are trained offline (see scripts/pretraining/) and
+        shipped in the image at /app/models/pretrained/trm_base_v1/.
+        NO gradient descent occurs during provisioning. This step:
+        1. Loads the 12 generic TRM checkpoints from /app/models/pretrained/
+        2. Copies each into the tenant-scoped checkpoint dir per (site × TRM)
+        3. Gates lane_volume_forecast to shipper facilities only (per
+           Core's get_active_tms_trms — internal-transfer/inbound lanes
+           inherit volume from the supply plan, not from a forecast)
+        4. Records corpus version + model version for audit
+
+        Completes in under 30 seconds. The Site tGNN (trained later)
+        handles per-tenant adaptation on top of these frozen TRM weights.
         """
-        from app.services.powell.generic_training_orchestrator import GenericTrainingOrchestrator
-        orchestrator = GenericTrainingOrchestrator(config_id=config_id)
-        result = await orchestrator.train_trms(epochs=20, num_samples=50000)
+        return await self._load_pretrained_trms(config_id)
 
-        if result.models_trained == 0:
-            msg = f"TRM training produced 0 checkpoints (errors={result.errors})"
-            logger.error("SOC II ALERT: %s for config %d", msg, config_id)
-            raise RuntimeError(msg)
-
-        if result.errors > 0:
-            logger.warning(
-                "TRM training completed with %d errors out of %d models for config %d",
-                result.errors, result.models_trained + result.errors, config_id,
-            )
-
-        return {
-            "status": "ok",
-            "trms_trained": result.models_trained,
-            "errors": result.errors,
-            "duration_seconds": result.duration_seconds,
-        }
+    # Legacy handlers — kept so old provisioning rows that reference
+    # these steps don't crash the dispatch loop. Both no-op with a skip.
+    async def _step_trm_training(self, config_id: int) -> dict:
+        """Legacy: replaced by trm_load_pretrained. Skips."""
+        logger.info("trm_training step skipped (replaced by trm_load_pretrained) for config %d", config_id)
+        return {"status": "skipped", "reason": "Replaced by trm_load_pretrained"}
 
     async def _step_rl_training(self, config_id: int) -> dict:
-        """Step 8b: TRM Phase 2 RL (foreground fallback, normally runs via _bg)."""
-        return await self._run_rl_training(config_id)
+        """Legacy: replaced by trm_load_pretrained. Skips."""
+        logger.info("rl_training step skipped (replaced by trm_load_pretrained) for config %d", config_id)
+        return {"status": "skipped", "reason": "Replaced by trm_load_pretrained"}
+
+    async def _load_pretrained_trms(self, config_id: int, force_refresh: bool = False) -> dict:
+        """Copy shipped pretrained TMS TRM checkpoints into the tenant scope.
+
+        - TRM weights are trained OFFLINE by the team (scripts/pretraining/).
+        - This step loads them from /app/models/pretrained/trm_base_v{N}/.
+        - NO gradient descent. Completes in under 30 seconds.
+        - The Site tGNN (trained later) handles per-tenant adaptation.
+
+        Refresh policy: existing tenant checkpoints are overwritten whenever
+        the product-shipped master checkpoint has a newer mtime, so tenants
+        pick up new generic TRM releases without a full re-provision.
+        `force_refresh=True` copies regardless of mtime.
+
+        Mirrors SCP's `_load_pretrained_trms` (see Autonomy-SCP) but uses
+        the TMS-native facility-type → active-TRM mapping in Core. The
+        TMS-native mapping gates `lane_volume_forecast` to shipper
+        facilities (statistical lane-volume forecasting only applies to
+        customer-facing outbound; internal-transfer and inbound lanes
+        inherit volume from the upstream supply / transfer plan).
+        """
+        import shutil
+        import time
+        from pathlib import Path
+        from app.db.session import sync_session_factory
+        from azirella_data_model.powell.tms.site_capabilities import get_active_tms_trms
+        from app.services.checkpoint_storage_service import checkpoint_dir
+
+        def _master_type_to_facility_type(site) -> str:
+            """Map canonical Site → TMS facility type for capability gating.
+
+            Pragmatic default: every internal site behaves as a `shipper`
+            unless explicitly tagged otherwise. Customers can override per
+            site via `Site.attributes['facility_type']` (e.g. set to
+            "terminal" for cross-docks, "carrier_yard" for trailer pools).
+            """
+            attrs = site.attributes if isinstance(site.attributes, dict) else {}
+            override = attrs.get("facility_type") if attrs else None
+            if override:
+                return str(override).lower()
+            mt = (site.master_type or "").lower()
+            # Manufacturers and inventory sites both function as shippers
+            # in the TMS plane (they originate outbound shipments). Vendors
+            # and customers are external endpoints (filtered by is_external
+            # before reaching this code).
+            if mt in ("manufacturer", "inventory"):
+                return "shipper"
+            return "shipper"
+
+        def _copy_if_stale(src: Path, dst: Path) -> str:
+            """Copy src → dst when dst is missing or older than src.
+
+            Returns: 'created' | 'refreshed' | 'skipped'.
+            """
+            if not dst.exists():
+                shutil.copy2(str(src), str(dst))
+                return "created"
+            if force_refresh or src.stat().st_mtime > dst.stat().st_mtime:
+                shutil.copy2(str(src), str(dst))
+                return "refreshed"
+            return "skipped"
+
+        t0 = time.time()
+        sync_db = sync_session_factory()
+        try:
+            from app.models.supply_chain_config import SupplyChainConfig, Site
+
+            config = sync_db.query(SupplyChainConfig).get(config_id)
+            if not config:
+                return {"status": "failed", "reason": "Config not found"}
+
+            tenant_id = config.tenant_id
+
+            # Pretrained checkpoint directory (shipped with Docker image).
+            # v1 has all 12 TMS TRM types including the new lane_volume_forecast.
+            pretrained_dir = Path("/app/models/pretrained/trm_base_v1")
+            if not pretrained_dir.exists():
+                return {
+                    "status": "failed",
+                    "reason": f"Pretrained dir missing: {pretrained_dir}. "
+                              f"Run scripts/pretraining/{{generate_tms_corpus,train_tms_trms}}.py "
+                              f"and stage outputs into {pretrained_dir}.",
+                }
+
+            # Target directory for this tenant/config
+            target_dir = checkpoint_dir(tenant_id, config_id) / "trm"
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Get all internal (non-external) sites
+            sites = (
+                sync_db.query(Site)
+                .filter(
+                    Site.config_id == config_id,
+                    Site.is_external == False,
+                )
+                .all()
+            )
+
+            created = 0
+            refreshed = 0
+            skipped = 0
+            sites_seen = 0
+            trm_types_seen = set()
+            missing_pretrained = set()
+
+            for site in sites:
+                facility_type = _master_type_to_facility_type(site)
+                active_trms = get_active_tms_trms(facility_type)
+                if not active_trms:
+                    continue
+                sites_seen += 1
+
+                for trm_type in active_trms:
+                    pretrained_path = pretrained_dir / f"trm_{trm_type}.pt"
+                    if not pretrained_path.exists():
+                        if trm_type not in missing_pretrained:
+                            logger.warning(
+                                "No pretrained checkpoint for TMS TRM %s "
+                                "(config %d) — site %d will fall back to heuristic",
+                                trm_type, config_id, site.id,
+                            )
+                            missing_pretrained.add(trm_type)
+                        continue
+
+                    target_path = target_dir / f"trm_{trm_type}_site{site.id}_v1.pt"
+                    outcome = _copy_if_stale(pretrained_path, target_path)
+                    if outcome == "created":
+                        created += 1
+                    elif outcome == "refreshed":
+                        refreshed += 1
+                    else:
+                        skipped += 1
+                    trm_types_seen.add(trm_type)
+
+            elapsed = time.time() - t0
+            loaded = created + refreshed + skipped
+            logger.info(
+                "Pretrained TMS TRM loading complete for config %d: %d checkpoints "
+                "(%d created, %d refreshed, %d up-to-date) across %d unique TRM "
+                "types and %d sites in %.1fs",
+                config_id, loaded, created, refreshed, skipped,
+                len(trm_types_seen), sites_seen, elapsed,
+            )
+
+            return {
+                "status": "ok",
+                "checkpoints_loaded": loaded,
+                "created": created,
+                "refreshed": refreshed,
+                "skipped_up_to_date": skipped,
+                "trm_types": len(trm_types_seen),
+                "sites": sites_seen,
+                "missing_pretrained": sorted(missing_pretrained),
+                "duration_seconds": round(elapsed, 1),
+                "force_refresh": force_refresh,
+            }
+
+        except Exception as e:
+            logger.error("Pretrained TMS TRM loading failed for config %d: %s",
+                         config_id, e, exc_info=True)
+            raise
+        finally:
+            sync_db.close()
 
     async def _run_rl_training(self, config_id: int) -> dict:
         """Run simulation-based RL training for all (site, trm_type) pairs.
@@ -2541,22 +2709,18 @@ class ProvisioningService:
         """Step 8 background: Train Capacity/RCCP tGNN (delegates to foreground handler)."""
         return await self._step_capacity_tgnn(config_id, db=db)
 
+    async def _step_trm_load_pretrained_bg(self, config_id: int, db: AsyncSession) -> dict:
+        """Background: load pretrained TMS TRM checkpoints (delegates to foreground handler)."""
+        return await self._load_pretrained_trms(config_id)
+
+    # Legacy background handlers — kept so old DB rows don't crash dispatch.
     async def _step_trm_training_bg(self, config_id: int, db: AsyncSession) -> dict:
-        """Step 5 background: TRM Phase 1 BC for ALL active TRMs at all non-market sites."""
-        from app.services.powell.generic_training_orchestrator import GenericTrainingOrchestrator
-        orchestrator = GenericTrainingOrchestrator(config_id=config_id)
-        result = await orchestrator.train_trms(epochs=20, num_samples=50000)
-        return {
-            "status": "ok" if result.errors == 0 else "partial",
-            "trms_trained": result.models_trained,
-            "sites_trained": result.sites_trained,
-            "errors": result.errors,
-            "duration_seconds": result.duration_seconds,
-        }
+        """Legacy: replaced by trm_load_pretrained."""
+        return {"status": "skipped", "reason": "Replaced by trm_load_pretrained"}
 
     async def _step_rl_training_bg(self, config_id: int, db: AsyncSession) -> dict:
-        """Step 8b background: TRM Phase 2 RL (PPO fine-tuning in digital twin)."""
-        return await self._run_rl_training(config_id)
+        """Legacy: replaced by trm_load_pretrained."""
+        return {"status": "skipped", "reason": "Replaced by trm_load_pretrained"}
 
     async def _step_site_tgnn_bg(self, config_id: int, db: AsyncSession) -> dict:
         """Step 8 background: Train Site tGNN (Layer 1.5) for all non-market sites.
