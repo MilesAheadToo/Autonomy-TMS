@@ -22,5 +22,5 @@ services:
 
 networks:
   default:
-    name: autonomy_autonomy-tms-network
+    name: autonomy-tms_autonomy-tms-network
     external: true
