@@ -65,6 +65,47 @@ Migration target: SCP exposes `scp_export_config_snapshot(config_name) -> Config
 
 Tracked in [Autonomy-Core MIGRATION_REGISTER §3.7](../../../Autonomy-Core/docs/MIGRATION_REGISTER.md).
 
+## Known gaps in current MCP coverage
+
+A 2026-04-29 audit of TMS's MCP surface against the queries SCP would realistically make found three gaps. **If you find yourself wanting one of these, ADD THE TOOL — do not work around it with a direct DB read or by extending `scp_etl.py`.** All three are tracked in [Autonomy-Core MIGRATION_REGISTER §3.8](../../../Autonomy-Core/docs/MIGRATION_REGISTER.md).
+
+### Gap 1 — `get_realized_shipments` (TMS-side, CRITICAL)
+
+**What's missing:** A tool that returns the actual shipment outcomes (delivered quantity, on-time variance, transit time, freight cost, exceptions) for SCP to use in forecast retraining, FVA metrics, demand-sensing TRM updates, and inventory-buffer learning.
+
+**Add it as:**
+```python
+get_realized_shipments(
+    tenant_id, config_id,
+    site_id?, lane_id?, product_id?,
+    delivered_after, delivered_before,
+    limit: int = 1000,
+) -> {"count": int, "shipments": [ShipmentOutcome, ...], "as_of_utc": datetime}
+```
+
+`ShipmentOutcome` is a Core type (lives in the intersection-contract package) — TMS imports + serialises, SCP imports + deserialises. Don't invent a TMS-local shape; use the Core schema.
+
+### Gap 2 — SCP MCP server isn't running independently (HIGH)
+
+**What's missing:** SCP has tool handlers in code, but no evidence of an independently-deployed MCP server in production. SCP's MCP client is wired only for ERP endpoints, not TMS.
+
+**What this means for TMS work:** if TMS code wants to call SCP via MCP today, it can't yet. Tracked in §3.8.2 (Core register). Don't work around it with a direct DB read against SCP — wait for the productionisation, or escalate.
+
+### Gap 3 — Intersection-contract MCP tools (HIGH)
+
+**What's missing:** SCP can ASK TMS "can you move this?" via `get_carrier_capacity` etc. SCP cannot SAY "I'm committing this and I need TMS to confirm." The joint-commit pattern (`ServiceWindowPromise`, `DeploymentRequirement`) has no MCP read or write tools on either side.
+
+**What this means for TMS work:** any new code that needs cross-plane *commit* (not just *read*) lands in §3.8.3 territory. Add the right tool symmetric on both sides; don't fake it with a one-direction call.
+
+## Smaller hygiene flags
+
+Audit also surfaced (track in §3.8 hygiene rollup):
+
+- `get_governance_status` takes only `tenant_id`, no `config_id` — tighten when next touched.
+- `chat_with_decisions` returns freeform text — not safe for cross-plane structured callers; consider gating it as session-internal.
+- Conformal bands (`p10`, `p50`, `p90`) on `get_carrier_capacity` collapse to point estimates until `conformal.active_predictors` is populated. Shape is correct; data is degenerate.
+- `get_carrier_capacity` exposes only a 14d aggregate carrier acceptance rate — per-carrier detail will be needed for SCP's carrier-tier ATP eventually. Defer until concrete consumer demand surfaces.
+
 ## How to apply (every TMS PR)
 
 - **New code that needs SCP-resident data** → use SCP's MCP. If the right tool doesn't exist, request it from the SCP team (or write it on the SCP side first); don't extend `scp_etl.py`.
