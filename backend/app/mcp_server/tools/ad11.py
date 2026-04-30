@@ -1,7 +1,7 @@
 """
 MCP tools — AD-11 Supply×Transport intersection contract.
 
-Per `Autonomy-Core/docs/SCP_TMS_COLLABORATION_ARCHITECTURE.md` §5 + §7,
+Per `Autonomy-Core/docs/CROSS_PLANE_COLLABORATION_ARCHITECTURE.md` §5 + §7,
 TMS exposes read-only tools that SCP agents call to inform their
 planning decisions:
 

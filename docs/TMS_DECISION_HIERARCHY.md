@@ -256,7 +256,7 @@ Analog across every plane.
 **AAP canonical decision types**:
 `DEPLOYMENT_REQUIREMENT`, `DISPATCH_COMMITMENT`, `SERVICE_WINDOW_PROMISE`, `BOUNDARY_ESCALATION`.
 
-Reference: Autonomy-Core `docs/SCP_TMS_COLLABORATION_ARCHITECTURE.md`
+Reference: Autonomy-Core `docs/CROSS_PLANE_COLLABORATION_ARCHITECTURE.md`
 (AD-11, locked 2026-04-22).
 
 ---
@@ -307,7 +307,7 @@ L4  →  reads rolling KPIs against θ; triggers strategic proposals when
 - ◐ L3: three-plan pipeline documented in `TACTICAL_PLANNING_REARCHITECTURE.md`
   + `TMS_TIER3_FIRST_PLAN.md` (Path C, "GraphSAGE-first, skip LP")
 - ◐ AAP: SCP × TMS boundary contracts locked in AD-11
-  (`SCP_TMS_COLLABORATION_ARCHITECTURE.md`)
+  (`CROSS_PLANE_COLLABORATION_ARCHITECTURE.md`)
 
 ### Not started
 - ✗ L4 Strategic: no TMS-specific S&OP agent; policy-parameter schema not
@@ -404,7 +404,7 @@ parallel, then L2 + L3 builds on top.
 - [TMS_MIGRATION_1_13_PUNCH_LIST.md](TMS_MIGRATION_1_13_PUNCH_LIST.md) —
   SCP-fork substrate extraction
 - Autonomy-Core `AGENT_ARCHITECTURE.md` — cross-product platform treatment
-- Autonomy-Core `SCP_TMS_COLLABORATION_ARCHITECTURE.md` (AD-11) —
+- Autonomy-Core `CROSS_PLANE_COLLABORATION_ARCHITECTURE.md` (AD-11) —
   cross-authority protocol
 - SCP `docs/internal/architecture/PLANNING_HIERARCHY_AND_MRP.md` —
   SCP-side hierarchy (analogous but different domain)
