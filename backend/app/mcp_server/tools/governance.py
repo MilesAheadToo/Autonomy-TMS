@@ -17,6 +17,7 @@ def register(mcp):
     @mcp.tool()
     async def get_governance_status(
         tenant_id: int,
+        config_id: Optional[int] = None,
     ) -> dict:
         """Get the current AIIO governance status for a tenant.
 
@@ -24,10 +25,18 @@ def register(mcp):
         write-back delay settings, and the operating schedule.
 
         Args:
-            tenant_id: Organization ID
+            tenant_id: Organization ID (REQUIRED).
+            config_id: Optional supply-chain config scope. **Currently advisory** —
+                the underlying tables (`decision_governance_policies`,
+                `guardrail_directives`, `tenant_oversight_config`) are tenant-scoped,
+                not config-scoped, so this argument is accepted for symmetry with
+                other MCP tools but does not filter rows. If the schema gains
+                `config_id` later, this becomes enforced. The `config_id_enforced`
+                flag in the response makes the current state explicit.
 
         Returns:
-            Governance configuration, active directives, and write-back settings.
+            Governance configuration, active directives, write-back settings, and
+            an `echoed` block with the input parameters + enforcement flags.
         """
         from sqlalchemy import text as sql_text
         from .db import get_db
@@ -113,4 +122,8 @@ def register(mcp):
                 "active_policies": policies,
                 "active_directives": directives,
                 "oversight_schedule": oversight,
+                "echoed": {
+                    "config_id": config_id,
+                    "config_id_enforced": False,
+                },
             }

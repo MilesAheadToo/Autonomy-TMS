@@ -38,22 +38,53 @@ def register(mcp):
         from .db import get_db
 
         async with get_db() as db:
-            # Sites
+            # Tenant-isolation gate. site / transportation_lane have no
+            # tenant_id column; they scope through supply_chain_configs.
+            # Verify the config belongs to the requesting tenant before
+            # returning rows. Without this check, a request with
+            # mismatched (tenant_id, config_id) would leak the config
+            # owner's topology. Fixed 2026-04-30 typed-empty audit.
+            tenant_check = await db.execute(
+                sql_text(
+                    "SELECT 1 FROM supply_chain_configs "
+                    "WHERE id = :config_id AND tenant_id = :tenant_id"
+                ),
+                {"config_id": config_id, "tenant_id": tenant_id},
+            )
+            if tenant_check.scalar() is None:
+                return {
+                    "site_count": 0,
+                    "lane_count": 0,
+                    "alert_count": 0,
+                    "sites": [],
+                    "lanes": [],
+                    "alerts": [],
+                    "echoed": {
+                        "tenant_id": tenant_id,
+                        "config_id": config_id,
+                        "tenant_isolation_check": "failed",
+                    },
+                }
+
+            # Sites — column names match canonical Core Site (azirella_data_model
+            # .master.config.Site): name, type, master_type. Earlier draft of
+            # this query used `description` and `site_type` which do not exist
+            # in the canonical schema; fixed 2026-04-30 typed-empty audit.
             sites_result = await db.execute(
                 sql_text("""
-                    SELECT id, description, site_type, master_type,
+                    SELECT id, name, type, master_type,
                            latitude, longitude, geo_id
                     FROM site
                     WHERE config_id = :config_id
-                    ORDER BY master_type, description
+                    ORDER BY master_type, name
                 """),
                 {"config_id": config_id},
             )
             sites = [
                 {
                     "id": r.id,
-                    "name": r.description,
-                    "type": r.site_type,
+                    "name": r.name,
+                    "type": r.type,
                     "master_type": r.master_type,
                     "latitude": r.latitude,
                     "longitude": r.longitude,
@@ -62,11 +93,15 @@ def register(mcp):
                 for r in sites_result.fetchall()
             ]
 
-            # Transportation lanes
+            # Transportation lanes — canonical TransportationLane carries
+            # `lead_time_days` (no `transit_time`/`transit_time_uom`) and
+            # has no mode column. Mode is derived per-shipment in TMS, not
+            # stored on the lane. Earlier draft selected non-existent
+            # columns; fixed 2026-04-30 typed-empty audit.
             lanes_result = await db.execute(
                 sql_text("""
-                    SELECT id, from_site_id, to_site_id, transportation_mode,
-                           transit_time, transit_time_uom
+                    SELECT id, from_site_id, to_site_id, lead_time_days,
+                           demand_lead_time, supply_lead_time
                     FROM transportation_lane
                     WHERE config_id = :config_id
                 """),
@@ -77,9 +112,10 @@ def register(mcp):
                     "id": r.id,
                     "from_site": r.from_site_id,
                     "to_site": r.to_site_id,
-                    "mode": r.transportation_mode,
-                    "transit_time": r.transit_time,
-                    "transit_time_uom": r.transit_time_uom,
+                    "mode": None,  # not modelled at lane level
+                    "lead_time_days": r.lead_time_days,
+                    "demand_lead_time": r.demand_lead_time,
+                    "supply_lead_time": r.supply_lead_time,
                 }
                 for r in lanes_result.fetchall()
             ]

@@ -41,7 +41,7 @@ def register(mcp):
         from app.services.decision_stream_service import DecisionStreamService
 
         async with get_db() as db:
-            service = DecisionStreamService(db)
+            service = DecisionStreamService(db, tenant_id=tenant_id)
             digest = await service.get_decision_digest(
                 decision_level=decision_level,
                 config_id=config_id,
@@ -65,6 +65,19 @@ def register(mcp):
     ) -> dict:
         """Ask a natural-language question about agent decisions.
 
+        > **SESSION-INTERNAL — not safe for cross-plane structured callers.**
+        > Returns freeform conversational text in `response`, not a typed
+        > structured payload. Cross-plane callers (SCP → TMS, future
+        > WMS → TMS, etc.) cannot parse the response reliably across MCP
+        > tool versions; structured queries should use the other Decision
+        > Stream / AD-11 tools (`get_decision_stream`, `get_realized_shipments`,
+        > `get_carrier_capacity`, etc.). This tool is intended for the
+        > Autonomy UI's chat surface only — same JWT scope as the user's
+        > REST session, not for service-to-service tokens.
+        > See [`Autonomy-TMS/.claude/rules/cross-plane-mcp-only.md`](
+        > ../../../../.claude/rules/cross-plane-mcp-only.md) §"Smaller hygiene flags"
+        > and Autonomy-Core MIGRATION_REGISTER §3.8 hygiene rollup.
+
         The Decision Stream chat can answer questions like:
         - "What are the most urgent decisions right now?"
         - "Why did the procurement agent create a PO for 500 units?"
@@ -79,15 +92,23 @@ def register(mcp):
 
         Returns:
             Response text, conversation ID, sources, and suggested follow-ups.
+            Output is freeform — DO NOT parse downstream. Use a structured
+            tool instead.
         """
         from .db import get_db
         from app.services.decision_stream_service import DecisionStreamService
 
         async with get_db() as db:
-            service = DecisionStreamService(db)
+            service = DecisionStreamService(db, tenant_id=tenant_id)
             result = await service.chat(
                 message=message,
                 conversation_id=conversation_id,
                 config_id=config_id,
             )
+            # Tag the response so downstream callers that DO see it know
+            # it's session-internal and not part of the structured
+            # cross-plane API contract.
+            if isinstance(result, dict):
+                result["_session_internal"] = True
+                result["_not_for_cross_plane_parsing"] = True
             return result

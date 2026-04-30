@@ -17,6 +17,16 @@ planning decisions:
         → list of joined LanePerformanceActuals + ServiceCommitmentOutcomes
           rows. Closes the SCP forecast / FVA / inventory-buffer
           feedback loop. Per Autonomy-Core MIGRATION_REGISTER §3.8.1.
+  * propose_service_window(...) — TMS proposes a capacity-backed
+        ServiceWindowPromise; thin wrapper over Core's
+        upsert_service_window_promise_if_live with source_plane=TRANSPORT.
+        Per MIGRATION_REGISTER §3.8.3.
+  * confirm_service_window(correlation_id, new_state)
+        → transitions an existing TMS ServiceWindowPromise to
+          FULFILLED or MISSED (direct ORM update, registry-guarded).
+  * get_pending_commitments(filters)
+        → ServiceWindowPromise rows in PROPOSED or JOINT_COMMITTED
+          state for SCP planning visibility.
 
 ## Contract invariants (all enforced)
 
@@ -57,6 +67,49 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import and_, desc, func, or_, select
 
 logger = logging.getLogger(__name__)
+
+
+def _swp_to_dict(swp) -> Dict[str, Any]:
+    """Serialise a ServiceWindowPromise ORM row to the MCP wire shape.
+
+    Producer-owned format. SCP-side consumers either deserialise into
+    their own typed projection, parse as `dict[str, Any]`, or pin to
+    this module's response shape via standard MCP tool versioning.
+    """
+    if swp is None:
+        return None  # type: ignore[return-value]
+
+    def _iso(dt):
+        return dt.isoformat() + "Z" if dt else None
+
+    def _enum_val(v):
+        if v is None:
+            return None
+        return v.value if hasattr(v, "value") else str(v)
+
+    return {
+        "id": int(swp.id) if swp.id is not None else None,
+        "tenant_id": int(swp.tenant_id) if swp.tenant_id is not None else None,
+        "correlation_id": swp.correlation_id,
+        "order_id": swp.order_id,
+        "product_id": swp.product_id,
+        "origin_site_id": swp.origin_site_id,
+        "dest_site_id": swp.dest_site_id,
+        "lane_id": swp.lane_id,
+        "promise_state": _enum_val(swp.promise_state),
+        "source_plane_last_updated": _enum_val(swp.source_plane_last_updated),
+        "atp_commit_qty": float(swp.atp_commit_qty) if swp.atp_commit_qty is not None else None,
+        "atp_available_at": _iso(swp.atp_available_at),
+        "capacity_commit_qty": float(swp.capacity_commit_qty) if swp.capacity_commit_qty is not None else None,
+        "capacity_window_start": _iso(swp.capacity_window_start),
+        "capacity_window_end": _iso(swp.capacity_window_end),
+        "conformal_p10": _iso(swp.conformal_p10),
+        "conformal_p50": _iso(swp.conformal_p50),
+        "conformal_p90": _iso(swp.conformal_p90),
+        "fulfilled_at": _iso(swp.fulfilled_at),
+        "created_at": _iso(swp.created_at),
+        "updated_at": _iso(swp.updated_at),
+    }
 
 
 def register(mcp):
@@ -688,6 +741,329 @@ def register(mcp):
                     "lane_id": int(lane_id) if lane_id is not None else None,
                     "product_id": product_id,
                     "carrier_id": carrier_id,
+                    "limit": limit,
+                },
+            }
+
+    # ── §3.8.3 — Joint-commit transport layer ──────────────────────
+    # Three tools wrapping the already-shipped Core helpers in
+    # `azirella_data_model.intersections.supply_transport.fallback`.
+    # The Core helpers are sync; the MCP tool surface is async — we
+    # bridge with `asyncio.to_thread` so the helper's plane-registry
+    # guard logic runs unchanged.
+    #
+    # Producer-owned wire formats (TMS-side, not Core). Standard MCP
+    # tool versioning applies for evolution. Per the corrected §3.8
+    # placement: canonical state lives in Core
+    # (ServiceWindowPromise ORM); the wire format lives in the
+    # producing plane (this file).
+
+    @mcp.tool()
+    async def propose_service_window(
+        tenant_id: int,
+        config_id: int,
+        correlation_id: str,
+        order_id: str,
+        product_id: str,
+        origin_site_id: str,
+        dest_site_id: str,
+        capacity_commit_qty: float,
+        capacity_window_start: str,
+        capacity_window_end: str,
+        lane_id: Optional[str] = None,
+        conformal_p10: Optional[str] = None,
+        conformal_p50: Optional[str] = None,
+        conformal_p90: Optional[str] = None,
+        promise_state: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Propose a TMS-side capacity-backed ServiceWindowPromise.
+
+        Thin wrapper over Core's `upsert_service_window_promise_if_live`
+        with `source_plane=Plane.TRANSPORT`, filling in the `capacity_*`
+        half of the joint promise. SCP fills the `atp_*` half via its
+        own MCP tool. When both halves are populated and consistent,
+        callers should advance `promise_state` to `JOINT_COMMITTED`.
+
+        Plane-absence behavior: registry-guarded. If the SUPPLY plane
+        is not registered for this tenant, the underlying helper
+        returns None and this tool returns
+        `{"status": "skipped", "reason": "supply plane not registered"}`.
+        Caller must treat this as solo-mode (TMS proceeds with its own
+        plan; no joint commit propagates).
+
+        Args:
+            tenant_id, config_id: canonical scope.
+            correlation_id: joining key (typically deployment-requirement-id
+                or transfer-order-id).
+            order_id, product_id, origin_site_id, dest_site_id: required
+                canonical refs. lane_id optional.
+            capacity_commit_qty: TMS half — quantity TMS commits to move.
+            capacity_window_start / capacity_window_end: ISO datetime
+                strings bounding the capacity window.
+            conformal_p10/50/90: optional ISO datetime — joint conformal
+                bands (TMS computes from carrier transit P10/P50/P90).
+            promise_state: optional, defaults to PROPOSED. Caller can
+                pass "JOINT_COMMITTED" if SCP's atp_* half is already
+                populated.
+
+        Returns dict:
+            * status: "ok" | "skipped"
+            * promise: full ServiceWindowPromise snapshot (if ok)
+            * reason: peer-absence explanation (if skipped)
+            * as_of_utc
+
+        Per MIGRATION_REGISTER §3.8.3.
+        """
+        import asyncio
+        from datetime import datetime as _dt
+        from app.db.session import sync_session_factory
+        from azirella_data_model.intersections.supply_transport import (
+            upsert_service_window_promise_if_live,
+            PromiseState,
+        )
+        from azirella_data_model.planes import Plane
+
+        def _parse_dt(s: Optional[str]):
+            if not s:
+                return None
+            return _dt.fromisoformat(s.replace("Z", ""))
+
+        cap_start = _parse_dt(capacity_window_start)
+        cap_end = _parse_dt(capacity_window_end)
+        p10 = _parse_dt(conformal_p10)
+        p50 = _parse_dt(conformal_p50)
+        p90 = _parse_dt(conformal_p90)
+
+        if promise_state and promise_state in PromiseState.__members__:
+            state = PromiseState[promise_state]
+        else:
+            state = PromiseState.PROPOSED
+
+        def _do():
+            db = sync_session_factory()
+            try:
+                row = upsert_service_window_promise_if_live(
+                    db,
+                    tenant_id=tenant_id,
+                    correlation_id=correlation_id,
+                    source_plane=Plane.TRANSPORT,
+                    order_id=order_id,
+                    product_id=product_id,
+                    origin_site_id=origin_site_id,
+                    dest_site_id=dest_site_id,
+                    lane_id=lane_id,
+                    capacity_commit_qty=capacity_commit_qty,
+                    capacity_window_start=cap_start,
+                    capacity_window_end=cap_end,
+                    conformal_p10=p10,
+                    conformal_p50=p50,
+                    conformal_p90=p90,
+                    promise_state=state,
+                    config_id=config_id,
+                )
+                db.commit()
+                return _swp_to_dict(row) if row else None
+            finally:
+                db.close()
+
+        snapshot = await asyncio.to_thread(_do)
+        now_iso = datetime.utcnow().isoformat() + "Z"
+        if snapshot is None:
+            return {
+                "status": "skipped",
+                "reason": "supply plane not registered for this tenant",
+                "tenant_id": tenant_id,
+                "config_id": config_id,
+                "correlation_id": correlation_id,
+                "as_of_utc": now_iso,
+            }
+        return {
+            "status": "ok",
+            "promise": snapshot,
+            "as_of_utc": now_iso,
+        }
+
+    @mcp.tool()
+    async def confirm_service_window(
+        tenant_id: int,
+        config_id: int,
+        correlation_id: str,
+        new_state: str,
+        fulfilled_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Transition an existing TMS-side ServiceWindowPromise to
+        FULFILLED or MISSED.
+
+        Direct ORM update (not upsert): Core's
+        `upsert_service_window_promise_if_live` uses ON CONFLICT DO
+        NOTHING and won't update an existing row's state. We fetch
+        with `get_service_window_promise`, then update + commit, with
+        the same plane-registry-guard semantics.
+
+        Plane-absence behavior: same as `propose_service_window`. If
+        SUPPLY isn't registered, returns `status: skipped` and does
+        not update.
+
+        Args:
+            tenant_id, config_id: canonical scope.
+            correlation_id: identifies the existing promise to transition.
+            new_state: "FULFILLED" or "MISSED". Other values rejected.
+            fulfilled_at: optional ISO datetime. Defaults to now if
+                new_state == "FULFILLED"; ignored otherwise.
+
+        Returns dict:
+            * status: "ok" | "skipped" | "not_found" | "error"
+            * promise: full snapshot of the updated row (if ok)
+            * reason: explanation (if not ok)
+            * as_of_utc
+
+        Per MIGRATION_REGISTER §3.8.3.
+        """
+        import asyncio
+        from datetime import datetime as _dt
+        from app.db.session import sync_session_factory
+        from azirella_data_model.intersections.supply_transport import (
+            get_service_window_promise,
+            PromiseState,
+        )
+        from azirella_data_model.planes import Plane, PlaneRegistry
+
+        valid_states = {"FULFILLED", "MISSED"}
+        if new_state not in valid_states:
+            return {
+                "status": "error",
+                "reason": f"new_state must be one of {sorted(valid_states)}; got {new_state!r}",
+                "as_of_utc": datetime.utcnow().isoformat() + "Z",
+            }
+        target = PromiseState[new_state]
+
+        if fulfilled_at:
+            fulfilled_dt = _dt.fromisoformat(fulfilled_at.replace("Z", ""))
+        elif target == PromiseState.FULFILLED:
+            fulfilled_dt = _dt.utcnow()
+        else:
+            fulfilled_dt = None
+
+        def _do():
+            db = sync_session_factory()
+            try:
+                if not PlaneRegistry.is_registered(
+                    db, tenant_id, Plane.SUPPLY, config_id=config_id,
+                ):
+                    return ("peer_absent", None)
+                row = get_service_window_promise(
+                    db, tenant_id=tenant_id, correlation_id=correlation_id,
+                )
+                if row is None:
+                    return ("not_found", None)
+                row.promise_state = target.value
+                if fulfilled_dt is not None:
+                    row.fulfilled_at = fulfilled_dt
+                row.source_plane_last_updated = Plane.TRANSPORT.value
+                db.commit()
+                return ("ok", _swp_to_dict(row))
+            finally:
+                db.close()
+
+        status, snapshot = await asyncio.to_thread(_do)
+        now_iso = datetime.utcnow().isoformat() + "Z"
+        if status == "peer_absent":
+            return {
+                "status": "skipped",
+                "reason": "supply plane not registered for this tenant",
+                "tenant_id": tenant_id,
+                "config_id": config_id,
+                "correlation_id": correlation_id,
+                "as_of_utc": now_iso,
+            }
+        if status == "not_found":
+            return {
+                "status": "not_found",
+                "reason": f"no ServiceWindowPromise with correlation_id={correlation_id!r}",
+                "tenant_id": tenant_id,
+                "config_id": config_id,
+                "correlation_id": correlation_id,
+                "as_of_utc": now_iso,
+            }
+        return {
+            "status": "ok",
+            "promise": snapshot,
+            "as_of_utc": now_iso,
+        }
+
+    @mcp.tool()
+    async def get_pending_commitments(
+        tenant_id: int,
+        config_id: int,
+        lane_id: Optional[str] = None,
+        site_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Return ServiceWindowPromise rows in PROPOSED or JOINT_COMMITTED state.
+
+        SCP planning visibility — what TMS is currently committed to
+        deliver. Read-only. No registry guard (consistent with Core's
+        `get_service_window_promise` — a tenant can always read its
+        own joint promises).
+
+        Args:
+            tenant_id, config_id: canonical scope. config_id is
+                advisory (ServiceWindowPromise table is tenant-scoped,
+                not config-scoped); echoed back in `filters_applied`
+                with `config_id_enforced=False`.
+            lane_id: optional — filter by canonical lane id (string).
+            site_id: optional — filter by origin OR destination site
+                (string).
+            limit: max rows; capped at 2000.
+
+        Returns dict:
+            * count
+            * commitments: list of ServiceWindowPromise dicts
+            * as_of_utc
+            * filters_applied: echoed inputs
+
+        Edge inputs return typed-empty (count=0, commitments=[]).
+
+        Per MIGRATION_REGISTER §3.8.3.
+        """
+        from .db import get_db
+        from azirella_data_model.intersections.supply_transport import (
+            ServiceWindowPromise, PromiseState,
+        )
+
+        limit = max(1, min(2000, int(limit)))
+
+        async with get_db() as db:
+            stmt = select(ServiceWindowPromise).where(
+                ServiceWindowPromise.tenant_id == tenant_id,
+                ServiceWindowPromise.promise_state.in_([
+                    PromiseState.PROPOSED.value,
+                    PromiseState.JOINT_COMMITTED.value,
+                ]),
+            )
+            if lane_id is not None:
+                stmt = stmt.where(ServiceWindowPromise.lane_id == lane_id)
+            if site_id is not None:
+                stmt = stmt.where(or_(
+                    ServiceWindowPromise.origin_site_id == site_id,
+                    ServiceWindowPromise.dest_site_id == site_id,
+                ))
+            stmt = stmt.order_by(
+                desc(ServiceWindowPromise.created_at)
+            ).limit(limit)
+
+            rows = (await db.execute(stmt)).scalars().all()
+
+            return {
+                "count": len(rows),
+                "commitments": [_swp_to_dict(r) for r in rows],
+                "as_of_utc": datetime.utcnow().isoformat() + "Z",
+                "filters_applied": {
+                    "tenant_id": int(tenant_id),
+                    "config_id": int(config_id),
+                    "config_id_enforced": False,
+                    "lane_id": lane_id,
+                    "site_id": site_id,
                     "limit": limit,
                 },
             }
