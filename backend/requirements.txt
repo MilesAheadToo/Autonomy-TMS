@@ -1,7 +1,7 @@
 absl-py==2.3.1
 aiofiles==0.7.0
-azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@a8cfc43#subdirectory=packages/data-model
-azirella-integrations @ git+https://github.com/azirella-ltd/Autonomy-Core.git@a8cfc43#subdirectory=packages/integrations
+azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@028ea9e#subdirectory=packages/data-model
+azirella-integrations @ git+https://github.com/azirella-ltd/Autonomy-Core.git@028ea9e#subdirectory=packages/integrations
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
