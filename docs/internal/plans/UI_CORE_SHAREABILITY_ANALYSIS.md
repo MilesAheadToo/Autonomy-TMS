@@ -14,7 +14,7 @@ Per the 2026-04-11 directive that "the work naturally moves from core being the 
 
 ## Sister docs
 
-- [`AUTONOMY_DATA_MODEL_PLAN.md`](https://github.com/MilesAheadToo/autonomy-ui-core/blob/main/docs/AUTONOMY_DATA_MODEL_PLAN.md) — also in the Autonomy-Core repo
-- [`COMPONENT_INVENTORY.md`](https://github.com/MilesAheadToo/autonomy-ui-core/blob/main/COMPONENT_INVENTORY.md) — also in the Autonomy-Core repo
+- [`packages/data-model/`](https://github.com/azirella-ltd/Autonomy-Core/tree/main/packages/data-model) — the shared data-model package
+- [`COMPONENT_INVENTORY.md`](https://github.com/azirella-ltd/Autonomy-Core/blob/main/COMPONENT_INVENTORY.md) — Autonomy-Core component inventory
 - [`TMS_DATA_MODEL.md`](../../TMS_DATA_MODEL.md) — TMS-side reference, **stays in this repo**
 - [`TMS_INDEPENDENCE_PLAN.md`](TMS_INDEPENDENCE_PLAN.md) — TMS-specific migration plan, **stays in this repo**

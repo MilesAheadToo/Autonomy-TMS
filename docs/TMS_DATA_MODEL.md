@@ -3,11 +3,9 @@
 **Last verified:** 2026-04-11
 **Lives in the TMS repo by design** — this is the TMS-specific view of which entities come from the shared canonical schema and which are TMS-only extensions. The SCP repo has its own counterpart (`SCP_DATA_MODEL.md`).
 **Sister docs (in the Autonomy-Core repo, which is the canonical home for shared architecture docs):**
-- Architecture decision: [`AUTONOMY_DATA_MODEL_PLAN.md`](https://github.com/MilesAheadToo/autonomy-ui-core/blob/main/docs/AUTONOMY_DATA_MODEL_PLAN.md)
-- Frontend story: [`UI_CORE_SHAREABILITY_ANALYSIS.md`](https://github.com/MilesAheadToo/autonomy-ui-core/blob/main/docs/UI_CORE_SHAREABILITY_ANALYSIS.md)
-- Component inventory: [`COMPONENT_INVENTORY.md`](https://github.com/MilesAheadToo/autonomy-ui-core/blob/main/COMPONENT_INVENTORY.md)
-
-> **Note on the repo names:** The `autonomy-ui-core` repo will be renamed to `Autonomy-Core` and restructured as a monorepo (`packages/ui-core/`, `packages/data-model/`, `packages/powell-core/`). The doc paths shown above remain stable across the rename. See [`AUTONOMY_DATA_MODEL_PLAN.md`](https://github.com/MilesAheadToo/autonomy-ui-core/blob/main/docs/AUTONOMY_DATA_MODEL_PLAN.md) for full plan.
+- Data-model package: [`packages/data-model/`](https://github.com/azirella-ltd/Autonomy-Core/tree/main/packages/data-model)
+- Frontend story: [`UI_CORE_SHAREABILITY_ANALYSIS.md`](https://github.com/azirella-ltd/Autonomy-Core/blob/main/docs/architecture/UI_CORE_SHAREABILITY_ANALYSIS.md)
+- Component inventory: [`COMPONENT_INVENTORY.md`](https://github.com/azirella-ltd/Autonomy-Core/blob/main/COMPONENT_INVENTORY.md)
 
 ## Purpose
 
@@ -19,7 +17,7 @@ This is the **TMS-side reference** for which data model entities come from where
 4. How TMS entities **translate to/from EDI X12** for external carrier integration
 5. Which entities are **fork residuals** that should be deleted (the SCP code carried over from the original fork)
 
-This is documentation only — the actual extraction and reorganization happens during the Autonomy-Core bootstrap (see [AUTONOMY_DATA_MODEL_PLAN.md](internal/plans/AUTONOMY_DATA_MODEL_PLAN.md)).
+This is documentation only — the actual canonical implementation lives in [`Autonomy-Core/packages/data-model/`](https://github.com/azirella-ltd/Autonomy-Core/tree/main/packages/data-model).
 
 ---
 
