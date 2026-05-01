@@ -15,7 +15,13 @@ The legacy dag_simpy_simulator.py is unchanged and still in use.
 """
 from __future__ import annotations
 
-from .lane_flow_simulator import LaneFlowSimulator
+from .lane_flow_simulator import (
+    CarrierProfile,
+    EquipmentProfile,
+    LaneFlowSimulator,
+    LanePhysicsParams,
+    RewardFn,
+)
 from .observations import (
     LaneFlowAction,
     LaneFlowObservation,
@@ -31,14 +37,18 @@ from .shipment_generator import (
 from .step_adapter import LaneFlowStepAdapter
 
 __all__ = [
+    "CarrierProfile",
+    "EquipmentProfile",
     "LaneFlowAction",
     "LaneFlowObservation",
     "LaneFlowReward",
     "LaneFlowSimulator",
     "LaneFlowStepAdapter",
     "LaneFlowTransition",
+    "LanePhysicsParams",
     "PARAMETRIC_STUB_PRODUCER_SIGNATURE",
     "Phase1ShipmentGenerator",
+    "RewardFn",
     "ShipmentGenerator",
     "lane_series_key",
 ]

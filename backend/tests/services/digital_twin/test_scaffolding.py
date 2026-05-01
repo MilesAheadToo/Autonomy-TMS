@@ -16,12 +16,15 @@ from datetime import date, timedelta
 import pytest
 
 from app.services.digital_twin import (
+    CarrierProfile,
+    EquipmentProfile,
     LaneFlowAction,
     LaneFlowObservation,
     LaneFlowReward,
     LaneFlowSimulator,
     LaneFlowStepAdapter,
     LaneFlowTransition,
+    LanePhysicsParams,
     PARAMETRIC_STUB_PRODUCER_SIGNATURE,
     Phase1ShipmentGenerator,
     ShipmentGenerator,
@@ -66,6 +69,42 @@ def _make_action() -> LaneFlowAction:
 
 def _make_reward() -> LaneFlowReward:
     return LaneFlowReward(total=0.0)
+
+
+def _make_lane_params() -> LanePhysicsParams:
+    """Minimal valid LanePhysicsParams for adapter / simulator tests."""
+    return LanePhysicsParams(
+        origin_site_id="site:1",
+        destination_site_id="site:2",
+        product_id="sku:A",
+        transit_buckets=1,
+        initial_equipment=4,
+        dock_capacity_per_bucket=20,
+        carriers={
+            "carrier:acme": CarrierProfile(
+                carrier_id="carrier:acme",
+                cost_per_load=100.0,
+                on_time_rate=0.95,
+                capacity_per_bucket=4,
+            ),
+        },
+        equipment_kinds={
+            "dry_van_53": EquipmentProfile(
+                equipment_kind="dry_van_53",
+                load_capacity_units=10.0,
+            ),
+        },
+        cost_target_per_load=100.0,
+    )
+
+
+def _make_simulator(*, generator: Phase1ShipmentGenerator | None = None) -> LaneFlowSimulator:
+    return LaneFlowSimulator(
+        generator=generator or Phase1ShipmentGenerator(),
+        tenant_id=1,
+        config_id=10,
+        lane_params=_make_lane_params(),
+    )
 
 
 def _make_envelope(
@@ -434,47 +473,15 @@ def test_phase1_generator_envelope_spread_validation():
         Phase1ShipmentGenerator(envelope_spread=(1.5, 0.5))
 
 
-# ── Simulator + adapter shells (PR-1) ─────────────────────────────────
-
-
-def test_simulator_reset_raises_not_implemented_in_pr1():
-    simulator = LaneFlowSimulator(
-        generator=Phase1ShipmentGenerator(),
-        tenant_id=1,
-        config_id=10,
-    )
-    with pytest.raises(NotImplementedError, match="PR-3"):
-        simulator.reset(scenario_seed=42)
-
-
-def test_simulator_step_raises_not_implemented_in_pr1():
-    simulator = LaneFlowSimulator(
-        generator=Phase1ShipmentGenerator(),
-        tenant_id=1,
-        config_id=10,
-    )
-    with pytest.raises(NotImplementedError, match="PR-3"):
-        simulator.step(_make_action())
+# ── Step adapter (PR-1 contracts; physics tests live in test_lane_flow_simulator.py) ──
 
 
 def test_step_adapter_rejects_step_before_reset():
-    adapter = LaneFlowStepAdapter(
-        simulator=LaneFlowSimulator(
-            generator=Phase1ShipmentGenerator(),
-            tenant_id=1,
-            config_id=10,
-        ),
-    )
+    adapter = LaneFlowStepAdapter(simulator=_make_simulator())
     with pytest.raises(RuntimeError, match="reset"):
         adapter.step(_make_action())
 
 
 def test_step_adapter_starts_with_empty_trajectory():
-    adapter = LaneFlowStepAdapter(
-        simulator=LaneFlowSimulator(
-            generator=Phase1ShipmentGenerator(),
-            tenant_id=1,
-            config_id=10,
-        ),
-    )
+    adapter = LaneFlowStepAdapter(simulator=_make_simulator())
     assert adapter.trajectory == []
