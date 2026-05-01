@@ -347,10 +347,26 @@ class TenantService:
             # Transport). config_id=None is the wildcard scope — applies
             # across every config in the tenant. See MIGRATION_REGISTER 1.9
             # and TMS_ADOPTION_GUIDE_20260420 §PREPARE.2.
+            #
+            # cross_plane_intersection=True (§3.10): TMS exposes the §3.8.3
+            # joint-commit MCP tools (propose_service_window,
+            # confirm_service_window, get_pending_commitments) plus the
+            # AD-11 read tools (get_carrier_capacity, get_dock_availability,
+            # get_active_exceptions, get_realized_shipments). This flag
+            # tells the plane-registry that TMS participates in the
+            # cross-plane intersection contract, so SCP / DP / future-WMS
+            # planes can discover the joint-commit surface without
+            # hard-coded URLs. See MIGRATION_REGISTER §3.8.3 and §3.10.
             try:
                 from azirella_data_model.planes import Plane, PlaneRegistry
-                PlaneRegistry.register(self.db, prod_tenant.id, Plane.TRANSPORT)
-                PlaneRegistry.register(self.db, learn_tenant.id, Plane.TRANSPORT)
+                PlaneRegistry.register(
+                    self.db, prod_tenant.id, Plane.TRANSPORT,
+                    cross_plane_intersection=True,
+                )
+                PlaneRegistry.register(
+                    self.db, learn_tenant.id, Plane.TRANSPORT,
+                    cross_plane_intersection=True,
+                )
             except Exception as e:  # noqa: BLE001 — registry must not block tenant create
                 logger.warning(
                     "Plane registration failed for tenant %s (prod) / %s (learn): %s",
