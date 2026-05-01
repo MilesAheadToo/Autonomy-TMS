@@ -80,12 +80,27 @@ services:
       - KB_DATABASE_URL=${KB_DATABASE_URL:-postgresql+psycopg2://${KB_POSTGRESQL_USER:-kb_user}:${KB_POSTGRESQL_PASSWORD:-kb_password}@kb-db:5432/${KB_POSTGRESQL_DATABASE:-autonomy_kb}}
       - KB_ASYNC_DATABASE_URL=${KB_ASYNC_DATABASE_URL:-postgresql+asyncpg://${KB_POSTGRESQL_USER:-kb_user}:${KB_POSTGRESQL_PASSWORD:-kb_password}@kb-db:5432/${KB_POSTGRESQL_DATABASE:-autonomy_kb}}
 
-      # RAG / Embedding configuration
-      - LLM_API_BASE=${LLM_API_BASE:-}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL_NAME=${LLM_MODEL_NAME:-}
-      - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      # ── LLM gateway (mss1-max lab) ─────────────────────────────────
+      # Every Autonomy backend reaches the lab gateway for all three
+      # workloads (CHAT / NARRATION / EMBEDDINGS) per the Azirella
+      # Assistant platform invariant.
+      # Setup: Autonomy-Core/docs/dev/MSS1_MAX_LAB_ACCESS.md
+      # Runbook: Autonomy-Core/docs/dev/LLM_DEPLOYMENT.md
+      - LLM_LAB_API_KEY=${LLM_LAB_API_KEY:-}
+      - LLM_CHAT_API_BASE=${LLM_CHAT_API_BASE:-http://mss1-max.local:8080/v1/chat}
+      - LLM_CHAT_MODEL_NAME=${LLM_CHAT_MODEL_NAME:-qwen3-32b-q5}
+      - LLM_NARRATION_API_BASE=${LLM_NARRATION_API_BASE:-http://mss1-max.local:8080/v1/narration}
+      - LLM_NARRATION_MODEL_NAME=${LLM_NARRATION_MODEL_NAME:-llama-3.3-70b-q5}
+      - LLM_EMBEDDINGS_API_BASE=${LLM_EMBEDDINGS_API_BASE:-http://mss1-max.local:8080/v1/embeddings}
+      - LLM_EMBEDDINGS_MODEL_NAME=${LLM_EMBEDDINGS_MODEL_NAME:-nomic-embed-text-v1.5}
+      # Legacy aliases — point at the same gateway. Substrate-bypass
+      # callers (per MIGRATION_REGISTER §3.16) read these until they
+      # migrate to azirella-assistant.LLMClient.
+      - LLM_API_BASE=${LLM_API_BASE:-http://mss1-max.local:8080/v1/chat}
+      - LLM_API_KEY=${LLM_API_KEY:-${LLM_LAB_API_KEY}}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME:-qwen3-32b-q5}
+      - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-http://mss1-max.local:8080/v1/embeddings}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text-v1.5}
       - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-768}
       - RAG_ENABLED=${RAG_ENABLED:-false}
       - RAG_CHUNK_SIZE=${RAG_CHUNK_SIZE:-1024}

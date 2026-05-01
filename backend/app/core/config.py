@@ -195,16 +195,31 @@ class Settings(BaseSettings):
     LLM_TIMEOUT: int = 10  # seconds
     LLM_CACHE_TTL: int = 300  # 5 minutes
 
-    # LLM connection — works with vLLM, Ollama, OpenAI, DeepSeek, LiteLLM, etc.
-    LLM_API_BASE: Optional[str] = None  # e.g. http://vllm:8000/v1 or http://ollama:11434/v1
+    # ── Lab gateway (mss1-max) — workload-split env-vars ────────────
+    # Every Autonomy backend reaches the lab gateway for all three
+    # workloads per the Azirella Assistant platform invariant. See
+    # Autonomy-Core/docs/architecture/LLM_ARCHITECTURE.md §2.1.1
+    # and Autonomy-Core/docs/dev/LLM_DEPLOYMENT.md.
+    LLM_LAB_API_KEY: Optional[str] = None
+    LLM_CHAT_API_BASE: Optional[str] = None
+    LLM_CHAT_MODEL_NAME: Optional[str] = None
+    LLM_NARRATION_API_BASE: Optional[str] = None
+    LLM_NARRATION_MODEL_NAME: Optional[str] = None
+    LLM_EMBEDDINGS_API_BASE: Optional[str] = None
+    LLM_EMBEDDINGS_MODEL_NAME: Optional[str] = None
+
+    # Legacy LLM connection — kept for callers that have not yet
+    # migrated to the workload split (MIGRATION_REGISTER §3.16).
+    # Deployments point these at the gateway too.
+    LLM_API_BASE: Optional[str] = None  # e.g. http://mss1-max.local:8080/v1/chat
     LLM_API_KEY: Optional[str] = None  # API key (reads OPENAI_API_KEY env as fallback)
     LLM_MODEL_NAME: Optional[str] = None  # Served model name (overrides LLM_MODEL)
 
-    # Embedding configuration
-    EMBEDDING_API_BASE: Optional[str] = None  # e.g. http://acer:8080 (TEI) or http://ollama:11434/v1
-    EMBEDDING_MODEL: str = "nomic-embed-text"
+    # Embedding configuration (legacy aliases — also point at the gateway)
+    EMBEDDING_API_BASE: Optional[str] = None  # e.g. http://mss1-max.local:8080/v1/embeddings
+    EMBEDDING_MODEL: str = "nomic-embed-text-v1.5"
     EMBEDDING_DIMENSIONS: int = 768
-    EMBEDDING_PROVIDER: str = "openai"  # "openai" (Ollama/vLLM/OpenAI) or "tei" (HuggingFace TEI)
+    EMBEDDING_PROVIDER: str = "openai"  # "openai" (Ollama/vLLM/OpenAI/llama.cpp) or "tei" (HuggingFace TEI)
 
     # RAG Configuration
     RAG_ENABLED: bool = False
