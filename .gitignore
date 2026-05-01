@@ -76,5 +76,8 @@ backend/training_data/
 # Symlink into SCP data dir — local-only convenience
 sap_demo_csvs
 
-# Claude Code runtime state
-.claude/scheduled_tasks.lock
+# Claude Code — runtime + per-user state (don't commit). Tracked siblings
+# (.claude/agents/, .claude/commands/, .claude/hooks/, .claude/settings.json)
+# stay in version control.
+.claude/*.lock
+.claude/settings.local.json
