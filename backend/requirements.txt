@@ -12,17 +12,17 @@ APScheduler==3.10.4
 async-timeout==5.0.1
 asyncio==3.4.3
 asyncpg==0.29.0
-attrs==25.4.0
+attrs>=25.4.0
 Authlib>=1.6.5,<2.0.0
 bcrypt==3.2.0
 blinker==1.9.0
 certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4
-click==8.1.8
+click>=8.1.8,<9.0
 cloudpickle==3.1.2
 contourpy==1.3.0
-cryptography==42.0.2
+cryptography>=42.0.2
 cycler==0.12.1
 distro==1.9.0
 dnspython==2.7.0
@@ -44,7 +44,7 @@ httpcore==1.0.9
 httptools==0.7.1
 httpx>=0.27.0,<0.29.0
 idna==3.11
-importlib_metadata==8.7.1
+importlib_metadata>=8.7.1
 importlib_resources==6.5.2
 iniconfig==2.1.0
 isodate==0.7.2
@@ -98,7 +98,7 @@ pytest-asyncio==0.23.5
 python-dateutil==2.8.2
 python-dotenv>=1.0.0,<2.0.0
 python-jose==3.3.0
-python-multipart==0.0.5
+python-multipart>=0.0.9,<1.0
 python-slugify==8.0.1
 python3-saml==1.15.0
 pytz==2025.2
@@ -119,7 +119,7 @@ tensorboard==2.20.0
 tensorboard-data-server==0.7.2
 text-unidecode==1.3
 threadpoolctl==3.6.0
-tomli==2.4.0
+tomli>=2.4.0
 torch==2.8.0
 torch_geometric==2.5.0
 tqdm==4.67.1
@@ -129,7 +129,7 @@ urllib3==2.6.3
 uvicorn>=0.30.0,<1.0.0
 uvloop==0.22.1
 watchfiles==1.1.1
-websockets==12.0
+websockets>=15.0.1,<17.0
 Werkzeug==3.1.5
 xmlsec==1.3.17
 yarl==1.22.0
@@ -143,4 +143,4 @@ pdf2image==1.17.0
 python-docx==1.1.0
 hdbcli>=2.18.0
 mcp>=1.0.0
-fastmcp>=0.15.0
+fastmcp==2.13.0

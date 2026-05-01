@@ -49,7 +49,7 @@ def create_server() -> "FastMCP":
 
     mcp = FastMCP(
         "Autonomy Supply Chain Platform",
-        description=(
+        instructions=(
             "Supply chain intelligence service: agent decisions, ATP/CTP, "
             "forecasts, supply plans, scenario simulation, and governance. "
             "Powered by 11 TRM agents, conformal prediction, and causal AI."
