@@ -176,7 +176,9 @@ def test_movement_plan_creates_header_and_items(db) -> None:
     plan = db.query(TransportationPlan).one()
     assert plan.plan_version == "unconstrained_reference"
     assert plan.status == PlanStatus.DRAFT
-    assert plan.optimization_method == "HEURISTIC_PHASE_1"
+    # §3.38 Phase 2A is now default; Phase 1 (no rate cards seeded) → graceful
+    # NULL carrier fallback, but optimization_method reflects the Phase 2A path.
+    assert plan.optimization_method == "HEURISTIC_PHASE_2A"
     assert plan.generated_by == "AGENT"
     assert plan.total_planned_loads == 5
 
@@ -186,7 +188,8 @@ def test_movement_plan_creates_header_and_items(db) -> None:
     assert all(item.mode == "LTL" for item in items)
     assert all(item.equipment_type is None for item in items)
     assert all(item.status == PlanItemStatus.PLANNED for item in items)
-    assert all(item.carrier_id is None for item in items)  # Phase 2 fills this
+    # No rate cards seeded → carrier_id stays None (graceful Phase 2A fallback)
+    assert all(item.carrier_id is None for item in items)
 
 
 def test_movement_plan_fans_out_per_load(db) -> None:
@@ -464,3 +467,341 @@ def test_full_l3_pipeline_end_to_end(db) -> None:
     # 5. Verify total item count = 11 per plan = 22 total
     total_items = db.query(TransportationPlanItem).count()
     assert total_items == 22
+
+
+# ===========================================================================
+# §3.38 Phase 2A — Carrier assignment via rate-card lookup
+# ===========================================================================
+
+
+def _seed_carrier_and_rate_cards(db: Session) -> None:
+    """Seed minimal Carrier + Contract + RateCard data for Phase 2A tests.
+
+    Two rate cards on the same lane (DRY_VAN, PER_MILE @ $2.50 and $3.00).
+    Phase 2A should pick the cheaper one ($2.50).
+    """
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(
+        id=1, tenant_id=1, scac="ABCD", display_name="Acme",
+        carrier_type="TRUCKLOAD",
+    ))
+    db.add(Carrier(
+        id=2, tenant_id=1, scac="WXYZ", display_name="Beta",
+        carrier_type="TRUCKLOAD",
+    ))
+    db.flush()
+    db.add(Contract(
+        id=1, tenant_id=1, carrier_id=1, contract_number="C-001",
+        contract_type="PRIMARY",
+        effective_from=datetime(2026, 1, 1), currency="USD",
+    ))
+    db.add(Contract(
+        id=2, tenant_id=1, carrier_id=2, contract_number="C-002",
+        contract_type="BACKUP",
+        effective_from=datetime(2026, 1, 1), currency="USD",
+    ))
+    db.flush()
+    # Cheapest: $2.50/mile from carrier 1
+    db.add(RateCard(
+        id=1, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.50,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    # More expensive: $3.00/mile from carrier 2
+    db.add(RateCard(
+        id=2, tenant_id=1, contract_id=2, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=3.00,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    db.flush()
+
+
+def _seed_lane_profile(db: Session, lane_id: int = 10, distance: float = 750.0) -> None:
+    """Seed a TMS-side LaneProfile with a known distance."""
+    from app.models.transportation_config import LaneProfile
+
+    db.add(LaneProfile(
+        lane_id=lane_id, config_id=1,
+        distance_miles=distance, primary_mode="FTL",
+    ))
+    db.flush()
+
+
+def test_phase_2a_assigns_cheapest_carrier(db) -> None:
+    """Phase 2A picks the cheapest matching rate card (carrier 1, $2.50/mi)
+    over the more expensive option ($3.00/mi)."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=5)
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    assert result.items_written == 5
+    assert result.items_with_carrier == 5
+    assert result.items_without_carrier == 0
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "HEURISTIC_PHASE_2A"
+    assert plan.total_estimated_cost == 9375.0  # 5 items × 2.50 × 750
+    assert plan.total_estimated_miles == 3750.0  # 5 items × 750
+    assert plan.avg_cost_per_mile == 2.5
+    assert plan.carrier_count == 1  # All items assigned to carrier 1
+
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.carrier_id == 1 for item in items)
+    assert all(item.rate_id == 1 for item in items)  # Cheaper rate
+    assert all(item.estimated_cost == 1875.0 for item in items)
+    assert all(item.distance_miles == 750.0 for item in items)
+    assert all(item.estimated_cost_per_mile == 2.5 for item in items)
+
+
+def test_phase_2a_graceful_null_when_no_rate_card_matches(db) -> None:
+    """No matching rate card (e.g., no REEFER rate cards) → carrier_id
+    and cost stay NULL. Plan still produced with HEURISTIC_PHASE_2A."""
+    _seed_carrier_and_rate_cards(db)  # Only DRY_VAN rate cards
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="REEFER", forecast_loads_p50=3)
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    assert result.items_written == 3
+    assert result.items_with_carrier == 0
+    assert result.items_without_carrier == 3
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "HEURISTIC_PHASE_2A"
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.carrier_id is None for item in items)
+    assert all(item.estimated_cost is None for item in items)
+
+
+def test_phase_2a_explicit_phase_1_fallback(db) -> None:
+    """Caller can opt out of Phase 2A — sets optimization_method back to
+    HEURISTIC_PHASE_1 even when rate cards exist."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4),
+        carrier_assignment_enabled=False,
+    )
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "HEURISTIC_PHASE_1"
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.carrier_id is None for item in items)
+    assert all(item.estimated_cost is None for item in items)
+    assert all(item.distance_miles is None for item in items)
+
+
+def test_phase_2a_filters_by_equipment_type(db) -> None:
+    """Rate card with equipment_type=NULL ('any equipment') is also a
+    match. equipment_type='REEFER' rate card NOT matched by DRY_VAN item."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(
+        id=1, tenant_id=1, scac="ABCD", display_name="Acme",
+        carrier_type="TRUCKLOAD",
+    ))
+    db.flush()
+    db.add(Contract(
+        id=1, tenant_id=1, carrier_id=1, contract_number="C-001",
+        contract_type="PRIMARY",
+        effective_from=datetime(2026, 1, 1), currency="USD",
+    ))
+    db.flush()
+    # REEFER-only rate card — should NOT match a DRY_VAN item
+    db.add(RateCard(
+        id=10, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="REEFER", rate_basis="PER_MILE", base_rate=2.00,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    # Equipment-agnostic rate card — should match DRY_VAN item
+    db.add(RateCard(
+        id=11, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type=None, rate_basis="PER_MILE", base_rate=3.00,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    # Should pick rate card 11 (equipment-agnostic at $3); rate card 10 (REEFER)
+    # rejected even though it's cheaper.
+    assert all(item.rate_id == 11 for item in items)
+    assert all(item.estimated_cost == 2250.0 for item in items)  # 3.00 × 750
+
+
+def test_phase_2a_filters_by_effective_window(db) -> None:
+    """Rate card outside the effective window (expired or not-yet-active)
+    is not matched."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(
+        id=1, tenant_id=1, scac="ABCD", display_name="Acme",
+        carrier_type="TRUCKLOAD",
+    ))
+    db.flush()
+    db.add(Contract(
+        id=1, tenant_id=1, carrier_id=1, contract_number="C-001",
+        contract_type="PRIMARY",
+        effective_from=datetime(2025, 1, 1), currency="USD",
+    ))
+    db.flush()
+    # Expired rate card (effective_to before period_start)
+    db.add(RateCard(
+        id=20, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=1.00,
+        effective_from=datetime(2025, 1, 1),
+        effective_to=datetime(2025, 12, 31),  # expired before May 2026
+    ))
+    # Active rate card
+    db.add(RateCard(
+        id=21, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.50,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    # Should pick rate card 21 (active); not 20 (expired) even though cheaper
+    assert all(item.rate_id == 21 for item in items)
+    assert all(item.estimated_cost == 1875.0 for item in items)
+
+
+def test_phase_2a_filters_by_lane_id(db) -> None:
+    """Rate card with explicit lane_id filter only matches that lane."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(
+        id=1, tenant_id=1, scac="ABCD", display_name="Acme",
+        carrier_type="TRUCKLOAD",
+    ))
+    db.flush()
+    db.add(Contract(
+        id=1, tenant_id=1, carrier_id=1, contract_number="C-001",
+        contract_type="PRIMARY",
+        effective_from=datetime(2026, 1, 1), currency="USD",
+    ))
+    db.flush()
+    # Cheap rate scoped to lane 99 ONLY (item is on lane 10 — should not match)
+    db.add(RateCard(
+        id=30, tenant_id=1, contract_id=1, lane_filter={"lane_id": 99},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=1.00,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    # Catch-all (matches lane 10)
+    db.add(RateCard(
+        id=31, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.50,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    # Should pick rate card 31 (catch-all); not 30 (lane 99 mismatch)
+    assert all(item.rate_id == 31 for item in items)
+
+
+def test_phase_2a_lane_distance_fallback_when_lane_profile_missing(db) -> None:
+    """When LaneProfile has no row for the lane, distance falls back to
+    the Phase 2A default (500 miles)."""
+    _seed_carrier_and_rate_cards(db)
+    # NO _seed_lane_profile call — distance falls back
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.distance_miles == 500.0 for item in items)
+    # Cost: 500 mi × $2.50/mi = $1250
+    assert all(item.estimated_cost == 1250.0 for item in items)
+
+
+def test_phase_2a_supports_flat_rate_basis(db) -> None:
+    """FLAT rate-basis: cost = base_rate (independent of distance)."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(
+        id=1, tenant_id=1, scac="ABCD", display_name="Acme",
+        carrier_type="TRUCKLOAD",
+    ))
+    db.flush()
+    db.add(Contract(
+        id=1, tenant_id=1, carrier_id=1, contract_number="C-001",
+        contract_type="PRIMARY",
+        effective_from=datetime(2026, 1, 1), currency="USD",
+    ))
+    db.flush()
+    db.add(RateCard(
+        id=40, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="FLAT", base_rate=1500.00,
+        effective_from=datetime(2026, 1, 1),
+    ))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.estimated_cost == 1500.0 for item in items)
+
+
+def test_phase_2a_picks_distinct_carriers_when_lanes_differ(db) -> None:
+    """Phase 2A reports `carrier_count` correctly when items span
+    multiple carriers."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(id=1, tenant_id=1, scac="C1", display_name="C1", carrier_type="TRUCKLOAD"))
+    db.add(Carrier(id=2, tenant_id=1, scac="C2", display_name="C2", carrier_type="TRUCKLOAD"))
+    db.flush()
+    db.add(Contract(id=1, tenant_id=1, carrier_id=1, contract_number="C-001",
+        contract_type="PRIMARY", effective_from=datetime(2026, 1, 1), currency="USD"))
+    db.add(Contract(id=2, tenant_id=1, carrier_id=2, contract_number="C-002",
+        contract_type="PRIMARY", effective_from=datetime(2026, 1, 1), currency="USD"))
+    db.flush()
+    # Carrier 1 cheap on lane 10; Carrier 2 cheap on lane 20
+    db.add(RateCard(id=1, tenant_id=1, contract_id=1, lane_filter={"lane_id": 10},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.00,
+        effective_from=datetime(2026, 1, 1)))
+    db.add(RateCard(id=2, tenant_id=1, contract_id=2, lane_filter={"lane_id": 20},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.00,
+        effective_from=datetime(2026, 1, 1)))
+    db.flush()
+    _seed_lane_profile(db, lane_id=10, distance=500)
+    _seed_lane_profile(db, lane_id=20, distance=500)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+    _seed_lane_volume_plan(db, lane_id=20, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=3)
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    plan = db.query(TransportationPlan).filter_by(id=result.plan_id).one()
+    assert plan.carrier_count == 2  # distinct carriers across lanes
