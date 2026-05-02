@@ -1,6 +1,6 @@
 # TMS TRM Heuristic Reference — Implemented Logic, Algorithms & Sources
 
-**Version:** 2.1 (heuristic library moved back to TMS, 2026-05-02)
+**Version:** 2.2 (lane-volume forecast segmentation extension, 2026-05-02)
 **Location:** `app.services.powell.tms_heuristic_library` (this repo)
 **Purpose:** Definitive reference for the deterministic heuristics that serve as
 (a) cold-start fallback logic for live TMS agents, and (b) teacher policy for
@@ -596,3 +596,37 @@ HOLD (10), REPOSITION (9)
 30. project44 — TrackedShipmentEvent schema, ETA ML models, CapacityProviderIdentifier
 31. FourKites — Dynamic ETA (XGBoost/LightGBM), Visibility Events
 32. Descartes MacroPoint — Carrier Location Tracking
+
+---
+
+## Changelog — v2.2 (2026-05-02): LaneVolumeForecast segmentation extension
+
+The 2026-04-29 `LaneVolumeForecastTRM` shipped lane-aggregate forecasts only — no mode / equipment segmentation. v2.2 closes that gap per industry norms (e2open / Blue Yonder / Oracle OTM / MercuryGate / SAP TM all forecast multi-axis: mode mandatory, equipment within FTL mandatory).
+
+**Design choice — share-of-aggregate, not Cartesian:** the L1 TRM still forecasts a single `loads` aggregate per (lane, period); mode + equipment are emitted as **mix shares** that split the aggregate at output time. This matches DAT / ACT Research publication patterns, is cleaner numerically on sparse lanes, and does not perturb the Syntetos-Boylan classification logic.
+
+**New `LaneVolumeForecastState` fields** (all additive, default empty / 0):
+- `mode_history: Dict[str, float]` — EWMA-smoothed share by mode (FTL / LTL / PARCEL / INTERMODAL / OCEAN / RAIL / AIR) over trailing 8 periods
+- `equipment_history: Dict[str, float]` — EWMA-smoothed share by equipment (DRY_VAN / REEFER / FLATBED / TANKER / CONTAINER_20 / CONTAINER_40), inside FTL
+- `mean_weight_kg_per_load: float` — historical mean weight per load
+- `mean_volume_m3_per_load: float` — historical mean volume per load
+- `proposed_weight_kg_p50: float` — optional caller-supplied weight P50 override
+- `proposed_volume_m3_p50: float` — optional caller-supplied volume P50 override
+
+**New helper `compute_segmented_loads(state, aggregate_loads_p50)`** in `dispatch.py`. Returns `Dict[str, Any]` with three `segmentation_method` values:
+- `"ewma_share_history"` — multi-mode mix applied
+- `"single_mode_passthrough"` — one mode dominates (≥ 95% share)
+- `"no_segmentation"` — history unavailable; aggregate is the only signal
+
+**Output keys merged into `TMSHeuristicDecision.params_used`** for every action path (DEFER / ESCALATE / MODIFY / ACCEPT):
+- `forecast_loads_p50` — primary primitive
+- `mode_mix`, `mode_loads_p50` — per-mode forecast (always present, single-key dict in no-segmentation case)
+- `equipment_mix`, `equipment_loads_p50` — per-equipment forecast within FTL (empty if non-FTL)
+- `forecast_weight_kg_p50` — secondary, P50 only (per industry norm)
+- `forecast_volume_m3_p50` — secondary, P50 only
+
+**Service level** is intentionally NOT a forecast facet — it's a planning constraint set at L4 customer-tier policy.
+
+**Phase 2 follow-ons (not in v2.2):** mode-cross-elasticity (LTL → FTL substitution as size grows), per-mode confidence bands, L3 Tactical Forecast Service that consumes these L1 outputs.
+
+See `Autonomy-Core/docs/MIGRATION_REGISTER.md` §3.36 for the full design rationale + industry citations.

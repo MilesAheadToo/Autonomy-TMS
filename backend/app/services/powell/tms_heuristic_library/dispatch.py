@@ -1315,6 +1315,120 @@ def _compute_equipment_reposition(state: EquipmentRepositionState) -> TMSHeurist
 # 12. Lane Volume Forecast (NEW — Execution-tier orchestrator)
 # ============================================================================
 
+# ── §3.36 — Lane-volume forecast segmentation ──────────────────────────
+
+
+def _normalize_share(history: Dict[str, float]) -> Dict[str, float]:
+    """Normalise a mix-share dict so values sum to 1.0.
+
+    Defensive: if all values are zero or negative, returns the input
+    unchanged (caller decides what to do).
+    """
+    total = sum(v for v in history.values() if v > 0)
+    if total <= 0:
+        return dict(history)
+    return {k: max(0.0, v) / total for k, v in history.items() if v > 0}
+
+
+def compute_segmented_loads(
+    state: LaneVolumeForecastState,
+    aggregate_loads_p50: float,
+) -> Dict[str, Any]:
+    """Compute mode-level + equipment-level mix shares + secondary
+    tonnage / cube derivations.
+
+    Industry-norm segmentation (§3.36): forecast aggregate loads at the
+    lane level, then split by EWMA-smoothed historical share. Equipment
+    segmentation runs only inside the FTL share when ``equipment_history``
+    is populated.
+
+    The function returns a dict suitable for merging into a heuristic
+    decision's ``params_used`` so consumers can read per-mode /
+    per-equipment forecasts without changing the ``TMSHeuristicDecision``
+    schema.
+
+    Returns:
+        Dict with keys:
+            - ``segmentation_method``: one of
+              ``"ewma_share_history"`` (multi-mode mix applied),
+              ``"single_mode_passthrough"`` (one mode dominates ≥ 95%),
+              ``"no_segmentation"`` (history unavailable; loads is the
+              only signal).
+            - ``forecast_loads_p50``: aggregate loads forecast (echo).
+            - ``mode_mix``: dict of mode → share (sums to ~1.0) when
+              segmented; empty otherwise.
+            - ``mode_loads_p50``: dict of mode → forecast loads. Always
+              present (single-key dict in the no-segmentation case).
+            - ``equipment_mix``: dict of equipment → share within FTL,
+              when ``equipment_history`` populated; empty otherwise.
+            - ``equipment_loads_p50``: dict of equipment → forecast
+              loads within FTL.
+            - ``forecast_weight_kg_p50``: derived from
+              ``proposed_weight_kg_p50`` if non-zero, else
+              ``mean_weight_kg_per_load × forecast_loads_p50``.
+            - ``forecast_volume_m3_p50``: derived analogously.
+    """
+    out: Dict[str, Any] = {
+        "forecast_loads_p50": float(aggregate_loads_p50),
+        "mode_mix": {},
+        "mode_loads_p50": {},
+        "equipment_mix": {},
+        "equipment_loads_p50": {},
+    }
+
+    # ── Mode segmentation ────────────────────────────────────────────
+    mode_hist = state.mode_history or {}
+    if not mode_hist:
+        out["segmentation_method"] = "no_segmentation"
+        out["mode_loads_p50"] = {"unsegmented": float(aggregate_loads_p50)}
+    else:
+        mode_mix = _normalize_share(mode_hist)
+        # If one mode is ≥ 0.95 share, treat as single-mode passthrough.
+        dominant = max(mode_mix.items(), key=lambda kv: kv[1], default=("", 0.0))
+        if dominant[1] >= 0.95:
+            out["segmentation_method"] = "single_mode_passthrough"
+            out["mode_mix"] = {dominant[0]: 1.0}
+            out["mode_loads_p50"] = {dominant[0]: float(aggregate_loads_p50)}
+        else:
+            out["segmentation_method"] = "ewma_share_history"
+            out["mode_mix"] = {k: round(v, 4) for k, v in mode_mix.items()}
+            out["mode_loads_p50"] = {
+                k: round(v * float(aggregate_loads_p50), 2)
+                for k, v in mode_mix.items()
+            }
+
+    # ── Equipment segmentation (within FTL only) ─────────────────────
+    equip_hist = state.equipment_history or {}
+    ftl_loads = float(out["mode_loads_p50"].get("FTL", 0.0))
+    if equip_hist and ftl_loads > 0:
+        equip_mix = _normalize_share(equip_hist)
+        out["equipment_mix"] = {k: round(v, 4) for k, v in equip_mix.items()}
+        out["equipment_loads_p50"] = {
+            k: round(v * ftl_loads, 2) for k, v in equip_mix.items()
+        }
+
+    # ── Secondary tonnage / cube (P50 only per industry norm) ────────
+    if state.proposed_weight_kg_p50 > 0:
+        out["forecast_weight_kg_p50"] = float(state.proposed_weight_kg_p50)
+    elif state.mean_weight_kg_per_load > 0:
+        out["forecast_weight_kg_p50"] = round(
+            state.mean_weight_kg_per_load * float(aggregate_loads_p50), 2,
+        )
+    else:
+        out["forecast_weight_kg_p50"] = 0.0
+
+    if state.proposed_volume_m3_p50 > 0:
+        out["forecast_volume_m3_p50"] = float(state.proposed_volume_m3_p50)
+    elif state.mean_volume_m3_per_load > 0:
+        out["forecast_volume_m3_p50"] = round(
+            state.mean_volume_m3_per_load * float(aggregate_loads_p50), 2,
+        )
+    else:
+        out["forecast_volume_m3_p50"] = 0.0
+
+    return out
+
+
 def _compute_lane_volume_forecast(state: LaneVolumeForecastState) -> TMSHeuristicDecision:
     """
     Lane-volume forecast orchestrator. Decides which model family to route to
@@ -1346,6 +1460,9 @@ def _compute_lane_volume_forecast(state: LaneVolumeForecastState) -> TMSHeuristi
     cls = state.syntetos_boylan_class()
     method = state.recommended_model()
 
+    # §3.36 — segmentation rides through every action path via params_used
+    segmentation = compute_segmented_loads(state, state.proposed_forecast_p50)
+
     detail = {
         "demand_class": cls,
         "recommended_method": method,
@@ -1354,6 +1471,7 @@ def _compute_lane_volume_forecast(state: LaneVolumeForecastState) -> TMSHeuristi
         "cv2": round(state.cv_squared(), 2),
         "trailing_mape": round(state.trailing_mape, 3),
         "interval_width_pct": round(state.forecast_interval_width_pct, 3),
+        **segmentation,
     }
 
     # ── DEFER: insufficient data to forecast ─────────────────────────

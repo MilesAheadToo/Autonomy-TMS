@@ -37,7 +37,7 @@ from .base import (
     ShipmentTrackingState,
     TMSHeuristicDecision,
 )
-from .dispatch import compute_tms_decision
+from .dispatch import compute_segmented_loads, compute_tms_decision
 
 __all__ = [
     "TMSHeuristicDecision",
@@ -53,5 +53,6 @@ __all__ = [
     "IntermodalTransferState",
     "EquipmentRepositionState",
     "LaneVolumeForecastState",
+    "compute_segmented_loads",
     "compute_tms_decision",
 ]

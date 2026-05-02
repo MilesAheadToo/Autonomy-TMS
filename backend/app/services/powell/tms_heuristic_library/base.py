@@ -709,6 +709,51 @@ class LaneVolumeForecastState:
     # ── Confidence / uncertainty ───────────────────────────────────────
     forecast_interval_width_pct: float = 0.0   # (P90 − P10) / P50; 0 if P50 = 0
 
+    # ── §3.36 — Segmentation (mode + equipment mix) ────────────────────
+    # Industry-norm forecast shape (e2open / Blue Yonder / Oracle OTM /
+    # MercuryGate / SAP TM): primary primitive is `loads`, segmented by
+    # mode (FTL / LTL / PARCEL / INTERMODAL / OCEAN / RAIL / AIR) and,
+    # inside FTL, by equipment type. Service level is a planning
+    # constraint set at L4 customer-tier policy, not a forecast facet.
+    #
+    # Segmentation is forecast as **mix shares applied to the aggregate**,
+    # not as a Cartesian (lane × mode × equipment) state explosion. This
+    # is the dominant industry pattern (see DAT / ACT Research lane-level
+    # publications): forecast aggregate volume per lane × period, then
+    # split by EWMA-smoothed historical share. Cleaner numerics on sparse
+    # lanes; matches how lane-volume actuals are reported by visibility
+    # platforms.
+    mode_history: Dict[str, float] = field(default_factory=dict)
+    """EWMA-smoothed historical share by mode over the trailing 8 periods.
+    Keys: ``FTL`` / ``LTL`` / ``PARCEL`` / ``INTERMODAL`` / ``OCEAN`` /
+    ``RAIL`` / ``AIR``. Empty dict → lane has only one mode or
+    segmentation history is unavailable; the heuristic falls back to
+    a single-mode passthrough."""
+
+    equipment_history: Dict[str, float] = field(default_factory=dict)
+    """EWMA-smoothed historical share by equipment type **inside FTL**
+    over the trailing 8 periods. Keys: ``DRY_VAN`` / ``REEFER`` /
+    ``FLATBED`` / ``TANKER`` / ``CONTAINER_20`` / ``CONTAINER_40``.
+    Empty dict → lane is non-FTL or single-equipment; equipment-level
+    segmentation is skipped for this lane."""
+
+    # ── Secondary capacity sizing (P50-only per industry norm) ────────
+    mean_weight_kg_per_load: float = 0.0
+    """Historical mean weight (kg) per load on this lane; used to derive
+    ``forecast_weight_kg_p50`` from forecast loads when a separate
+    weight forecast isn't provided."""
+
+    mean_volume_m3_per_load: float = 0.0
+    """Historical mean volume (m³) per load."""
+
+    proposed_weight_kg_p50: float = 0.0
+    """Optional caller-provided weight P50. Overrides the
+    ``mean_weight_kg_per_load × forecast_loads_p50`` derivation."""
+
+    proposed_volume_m3_p50: float = 0.0
+    """Optional caller-provided volume P50. Overrides the
+    ``mean_volume_m3_per_load × forecast_loads_p50`` derivation."""
+
     def adi(self) -> float:
         return max(1.0, self.avg_demand_interval)
 
