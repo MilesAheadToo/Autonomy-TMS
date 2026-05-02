@@ -26,14 +26,33 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Mapping
 
+from azirella_data_model.conformal import ConformalBand
 from azirella_data_model.digital_twin.twin_interface import (
     TwinMode,
     assert_plan_production_is_deterministic,
 )
+from azirella_data_model.ml.outcome import OutcomeEvent
 from azirella_demand_planning_contract import Tier
 
 from .observations import LaneFlowAction, LaneFlowObservation, LaneFlowReward
 from .shipment_generator import ShipmentGenerator, lane_series_key
+
+# Producer signature stamped on §3.31 OutcomeEvents emitted by the
+# Phase-1 lane-flow simulator. Bump when emission semantics change so
+# downstream training corpus / audit consumers can route on origin.
+OUTCOME_PRODUCER_SIGNATURE = "tms:lane_flow_simulator:v0.1.0"
+
+# Producer signature carried on ConformalBands the simulator constructs
+# from envelope rows before sampling. The envelope itself was produced
+# by a ShipmentGenerator (Phase 1 / 2 / 3); this signature identifies
+# the simulator-side wrapping step, not the upstream producer.
+CONFORMAL_BAND_PRODUCER_SIGNATURE = "tms:lane_flow_simulator:envelope_row:v0.1.0"
+
+# Outcome callback type — the simulator emits OutcomeEvents through
+# this sink when shipments dispatch and arrive. Sinks are responsible
+# for routing (training corpus collection, BSC reward attribution,
+# audit logs).
+OutcomeSink = Callable[[OutcomeEvent], None]
 
 # Tier → bucket size in days. Mirrors the ladder in shipment_generator.py.
 _BUCKET_DAYS: dict[Tier, int] = {
@@ -136,10 +155,17 @@ class LanePhysicsParams:
 
 @dataclass
 class _InFlightLoad:
-    """A dispatched load awaiting arrival."""
+    """A dispatched load awaiting arrival.
+
+    ``decision_id`` and ``carrier_id`` are carried so the §3.31
+    OutcomeEvent emitted on arrival can be joined back to the
+    dispatch tender that produced it.
+    """
 
     arrival_bucket: int
     on_time: bool
+    decision_id: str = ""
+    carrier_id: str = ""
 
 
 @dataclass
@@ -217,6 +243,7 @@ class LaneFlowSimulator:
         demand_stochastic: bool = True,
         on_time_stochastic: bool = True,
         reward_fn: RewardFn | None = None,
+        outcome_sink: OutcomeSink | None = None,
     ):
         self._generator = generator
         self.tenant_id = int(tenant_id)
@@ -228,6 +255,7 @@ class LaneFlowSimulator:
         self.demand_stochastic = bool(demand_stochastic)
         self.on_time_stochastic = bool(on_time_stochastic)
         self._reward_fn: RewardFn = reward_fn or self._default_reward
+        self._outcome_sink: OutcomeSink | None = outcome_sink
 
         if self.horizon_buckets < 1:
             raise ValueError(
@@ -336,11 +364,50 @@ class LaneFlowSimulator:
         unmet = max(0, loads_needed - allowed)
 
         # 4. Dispatch: equipment leaves origin, loads enter the in-flight queue.
-        for _ in range(allowed):
+        for load_idx in range(allowed):
             on_time = self._sample_on_time(carrier, action)
             arrival_bucket = self._state.bucket + self.lane_params.transit_buckets
             self._state.in_flight.append(
-                _InFlightLoad(arrival_bucket=arrival_bucket, on_time=on_time)
+                _InFlightLoad(
+                    arrival_bucket=arrival_bucket,
+                    on_time=on_time,
+                    decision_id=self._make_decision_id(load_idx),
+                    carrier_id=carrier.carrier_id,
+                )
+            )
+        # §3.31 OutcomeEvents — tender_accepted per dispatched load,
+        # tender_declined per unmet (capacity-rejected) load. Emitted
+        # at decision time so downstream training corpus / BSC reward
+        # attribution can correlate with the action that produced them.
+        for load_idx in range(allowed):
+            self._emit_outcome(
+                decision_id=self._make_decision_id(load_idx),
+                decision_type="load_dispatch",
+                outcome_kind="tender_accepted",
+                payload={
+                    "carrier_id": carrier.carrier_id,
+                    "equipment_kind": equipment.equipment_kind,
+                    "bucket": self._state.bucket,
+                    "transportation_lane_id": lane_series_key(
+                        self.lane_params.origin_site_id,
+                        self.lane_params.destination_site_id,
+                    ),
+                },
+            )
+        for unmet_idx in range(unmet):
+            self._emit_outcome(
+                decision_id=self._make_decision_id(allowed + unmet_idx),
+                decision_type="load_dispatch",
+                outcome_kind="tender_declined",
+                payload={
+                    "carrier_id": carrier.carrier_id,
+                    "reason": "capacity_or_equipment_exhausted",
+                    "bucket": self._state.bucket,
+                    "transportation_lane_id": lane_series_key(
+                        self.lane_params.origin_site_id,
+                        self.lane_params.destination_site_id,
+                    ),
+                },
             )
         self._state.equipment_available -= allowed
         self._state.dock_queue_depth += unmet
@@ -352,6 +419,26 @@ class LaneFlowSimulator:
             l for l in self._state.in_flight if l.arrival_bucket > next_bucket
         ]
         on_time_count = sum(1 for l in arriving if l.on_time)
+        # §3.31 OutcomeEvents — shipment_delivered / shipment_late per
+        # arriving load. ``decision_id`` carries the dispatch-side id
+        # so consumers can join arrival outcomes back to the dispatch
+        # tender that produced them.
+        for load in arriving:
+            self._emit_outcome(
+                decision_id=load.decision_id,
+                decision_type="load_dispatch",
+                outcome_kind=(
+                    "shipment_delivered" if load.on_time else "shipment_late"
+                ),
+                payload={
+                    "carrier_id": load.carrier_id,
+                    "arrival_bucket": load.arrival_bucket,
+                    "transportation_lane_id": lane_series_key(
+                        self.lane_params.origin_site_id,
+                        self.lane_params.destination_site_id,
+                    ),
+                },
+            )
         # Equipment returns at destination — Phase 1 collapses dwell to zero,
         # so it's available again next bucket. Phase 2 layers dwell + reposition.
         self._state.equipment_available += len(arriving)
@@ -418,24 +505,36 @@ class LaneFlowSimulator:
                 and row.destination_site_id == self.lane_params.destination_site_id
                 and row.product_id == self.lane_params.product_id
             ):
-                return self._realise_envelope_row(row.p10, row.p50, row.p90)
+                # §3.31 ConformalBand: wire-format wrapper around the
+                # raw triple. Construction validates p10 <= p50 <= p90;
+                # if a producer ever emits an out-of-order envelope,
+                # this surfaces here at the simulator boundary instead
+                # of silently sampling from a malformed distribution.
+                band = ConformalBand(
+                    p10=float(row.p10),
+                    p50=float(row.p50),
+                    p90=float(row.p90),
+                    producer_signature=CONFORMAL_BAND_PRODUCER_SIGNATURE,
+                )
+                return self._realise_envelope_row(band)
         return 0
 
-    def _realise_envelope_row(self, p10: float, p50: float, p90: float) -> int:
-        """Map (P10, P50, P90) into a realised line-item count.
+    def _realise_envelope_row(self, band: ConformalBand) -> int:
+        """Map a :class:`ConformalBand` into a realised line-item count.
 
-        - PLAN_PRODUCTION (or ``demand_stochastic=False``): use P50.
-        - TRAINING with stochasticity: triangular sample on (P10, P50, P90).
+        - PLAN_PRODUCTION (or ``demand_stochastic=False``): use ``band.p50``.
+        - TRAINING with stochasticity: triangular sample on
+          ``(band.p10, band.p50, band.p90)``.
         """
         if not self.demand_stochastic or self.mode is TwinMode.PLAN_PRODUCTION:
-            return max(0, int(round(p50)))
+            return max(0, int(round(band.p50)))
         # Triangular sample using the seeded rng — keeps determinism.
         u = self._state.rng.random()
         # Standard inverse-CDF for triangular(low=p10, mode=p50, high=p90).
         # Avoid degenerate denominators when bands collapse.
-        low, mode, high = p10, p50, p90
+        low, mode, high = band.p10, band.p50, band.p90
         if high <= low:
-            return max(0, int(round(p50)))
+            return max(0, int(round(band.p50)))
         f_mode = (mode - low) / (high - low) if high > low else 0.5
         if u < f_mode:
             value = low + ((u * (high - low) * (mode - low)) ** 0.5)
@@ -652,11 +751,58 @@ class LaneFlowSimulator:
             return default
         return sum(values) / len(values)
 
+    # ------------------------------------------------------------------
+    # §3.31 OutcomeEvent emission
+    # ------------------------------------------------------------------
+
+    def _make_decision_id(self, load_idx: int) -> str:
+        """Stable decision-id for a load dispatched (or denied) in the
+        current bucket. Joins arrival outcomes back to dispatch tenders.
+        """
+        return (
+            f"tenant={self.tenant_id}|config={self.config_id}|"
+            f"lane={self.lane_params.origin_site_id}->"
+            f"{self.lane_params.destination_site_id}|"
+            f"product={self.lane_params.product_id}|"
+            f"bucket={self._state.bucket}|load={load_idx}"
+        )
+
+    def _emit_outcome(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome_kind: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Emit one :class:`OutcomeEvent` to the registered sink.
+
+        Silent no-op when no sink is registered — the simulator is
+        usable headless (training-without-collection) and only pays
+        the construction cost of OutcomeEvent when a sink will read
+        it. Sink exceptions propagate; if a sink can fail the caller
+        wraps it.
+        """
+        if self._outcome_sink is None:
+            return
+        event = OutcomeEvent.now(
+            decision_id=decision_id,
+            decision_type=decision_type,
+            outcome_kind=outcome_kind,
+            payload=payload,
+            tenant_id=self.tenant_id,
+            producer=OUTCOME_PRODUCER_SIGNATURE,
+        )
+        self._outcome_sink(event)
+
 
 __all__ = [
     "CarrierProfile",
+    "CONFORMAL_BAND_PRODUCER_SIGNATURE",
     "EquipmentProfile",
     "LaneFlowSimulator",
     "LanePhysicsParams",
+    "OUTCOME_PRODUCER_SIGNATURE",
+    "OutcomeSink",
     "RewardFn",
 ]

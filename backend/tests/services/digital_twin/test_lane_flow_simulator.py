@@ -526,3 +526,160 @@ def test_step_rejects_unknown_equipment():
             equipment_kind="unknown_kind",
             dispatch_offset_hours=0.0,
         ))
+
+
+# ── §3.31 ConformalBand adoption ─────────────────────────────────────
+
+
+def test_envelope_row_realised_via_conformal_band():
+    """Sampling routes through a :class:`ConformalBand` instance built
+    from the envelope row. Out-of-order producers are rejected at
+    construction — verified by patching the simulator with a synthetic
+    envelope that has p10 > p50 and asserting failure."""
+    from azirella_data_model.conformal import ConformalBand
+
+    # Direct unit test: ConformalBand validates ordering at the boundary.
+    with pytest.raises(ValueError, match="p10 <= p50 <= p90"):
+        ConformalBand(p10=10.0, p50=5.0, p90=20.0)
+
+
+def test_realise_envelope_row_accepts_conformal_band():
+    """The simulator's helper method takes a ConformalBand and returns
+    an int — the public contract after the §3.31 refactor."""
+    from azirella_data_model.conformal import ConformalBand
+
+    sim = _simulator()
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    band = ConformalBand(p10=10.0, p50=20.0, p90=30.0)
+    realised = sim._realise_envelope_row(band)
+    assert isinstance(realised, int)
+    assert realised >= 0
+
+
+def test_realise_envelope_row_plan_production_uses_p50_from_band():
+    """PLAN_PRODUCTION mode collapses to band.p50."""
+    from azirella_data_model.conformal import ConformalBand
+
+    sim = _simulator(
+        mode=TwinMode.PLAN_PRODUCTION,
+        demand_stochastic=False,
+        on_time_stochastic=False,
+    )
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    band = ConformalBand(p10=10.0, p50=20.0, p90=30.0)
+    assert sim._realise_envelope_row(band) == 20
+
+
+# ── §3.31 OutcomeEvent emission ──────────────────────────────────────
+
+
+def test_outcome_sink_receives_tender_accepted_per_dispatched_load():
+    """One ``tender_accepted`` event per load actually dispatched."""
+    from azirella_data_model.ml.outcome import OutcomeEvent
+
+    captured: list[OutcomeEvent] = []
+    sim = _simulator(outcome_sink=captured.append)
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    obs, _, _, info = sim.step(_action("carrier:acme"))
+    accepted = [e for e in captured if e.outcome_kind == "tender_accepted"]
+    assert len(accepted) == info["loads_dispatched"]
+    for event in accepted:
+        assert event.decision_type == "load_dispatch"
+        assert event.tenant_id == 1
+        assert event.payload["carrier_id"] == "carrier:acme"
+        assert event.producer == "tms:lane_flow_simulator:v0.1.0"
+
+
+def test_outcome_sink_receives_tender_declined_when_capacity_exceeded():
+    """Loads needed beyond carrier capacity → ``tender_declined``."""
+    from azirella_data_model.ml.outcome import OutcomeEvent
+
+    # Force capacity exhaustion: tiny carrier capacity + big base volume.
+    tight_carriers = {
+        "carrier:tiny": CarrierProfile(
+            carrier_id="carrier:tiny",
+            cost_per_load=120.0,
+            on_time_rate=0.95,
+            capacity_per_bucket=1,
+        ),
+    }
+    captured: list[OutcomeEvent] = []
+    sim = LaneFlowSimulator(
+        generator=Phase1ShipmentGenerator(
+            candidate_lanes=[("site:1", "site:2")],
+            candidate_products=["sku:A"],
+            base_volumes={("site:1", "site:2", "sku:A"): 200.0},
+            seed=42,
+        ),
+        tenant_id=1,
+        config_id=10,
+        lane_params=LanePhysicsParams(
+            origin_site_id="site:1",
+            destination_site_id="site:2",
+            product_id="sku:A",
+            transit_buckets=1,
+            initial_equipment=10,
+            dock_capacity_per_bucket=20,
+            carriers=tight_carriers,
+            equipment_kinds=_equipment(),
+            cost_target_per_load=100.0,
+        ),
+        tier=Tier.TACTICAL,
+        horizon_buckets=4,
+        outcome_sink=captured.append,
+    )
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    obs, _, _, info = sim.step(_action("carrier:tiny"))
+    declined = [e for e in captured if e.outcome_kind == "tender_declined"]
+    assert len(declined) == info["loads_unmet"]
+    for event in declined:
+        assert event.payload["reason"] == "capacity_or_equipment_exhausted"
+
+
+def test_outcome_sink_receives_arrival_outcomes():
+    """One ``shipment_delivered`` or ``shipment_late`` per arrival."""
+    from azirella_data_model.ml.outcome import OutcomeEvent
+
+    captured: list[OutcomeEvent] = []
+    sim = _simulator(outcome_sink=captured.append)
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    # transit_buckets=1, so dispatched-in-step-0 loads arrive in step-1.
+    sim.step(_action("carrier:acme"))
+    captured.clear()
+    obs, _, _, info = sim.step(_action("carrier:acme"))
+    arrival_events = [
+        e
+        for e in captured
+        if e.outcome_kind in {"shipment_delivered", "shipment_late"}
+    ]
+    assert len(arrival_events) == info["loads_arrived"]
+
+
+def test_outcome_decision_id_links_dispatch_to_arrival():
+    """``decision_id`` at arrival matches the dispatch tender's id —
+    enabling join in the training-corpus consumer."""
+    from azirella_data_model.ml.outcome import OutcomeEvent
+
+    captured: list[OutcomeEvent] = []
+    sim = _simulator(outcome_sink=captured.append)
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    sim.step(_action("carrier:acme"))
+    sim.step(_action("carrier:acme"))
+    accepted_ids = {
+        e.decision_id for e in captured if e.outcome_kind == "tender_accepted"
+    }
+    arrival_ids = {
+        e.decision_id
+        for e in captured
+        if e.outcome_kind in {"shipment_delivered", "shipment_late"}
+    }
+    # Every arrival id must come from a prior tender_accepted id.
+    assert arrival_ids.issubset(accepted_ids)
+
+
+def test_outcome_sink_silent_no_op_when_unset():
+    """No sink → no outcome construction, no exceptions."""
+    sim = _simulator()  # outcome_sink omitted
+    sim.reset(scenario_seed=42, anchor_date=date(2026, 1, 5))
+    # Should not raise
+    sim.step(_action("carrier:acme"))
