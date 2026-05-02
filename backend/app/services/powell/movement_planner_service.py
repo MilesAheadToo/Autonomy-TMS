@@ -124,6 +124,27 @@ class RateAssignment:
     """Lane distance used to compute the cost. Recorded so consumers
     can audit the cost derivation."""
 
+    rate_card: Optional[object] = field(default=None, compare=False, repr=False)
+    """Reference to the resolved RateCard ORM row. Carried so
+    ChargeCalculator integration (Phase 2A.1 / §3.38 item 2) can
+    invoke the canonical math path without a re-fetch. Excluded from
+    equality / repr to keep the dataclass lightweight."""
+
+    contract: Optional[object] = field(default=None, compare=False, repr=False)
+    """Reference to the rate card's parent Contract ORM row. Carried
+    for ChargeCalculator wiring."""
+
+    accessorials: tuple = field(default=(), compare=False, repr=False)
+    """Optional tuple of Accessorial ORM rows the contract has.
+    Phase 2A.1 always passes ``()`` since live accessorial-conditions
+    aren't available at planning time. Phase 3 will populate this
+    when ChargeCalculator's accessorial path matures."""
+
+    fuel_formula: Optional[object] = field(default=None, compare=False, repr=False)
+    """Optional FuelSurchargeFormula ORM row. Same Phase 2A.1 caveat
+    as ``accessorials``: live fuel-index data isn't fetched at planning
+    time; Phase 3 will populate it."""
+
 
 _NULL_ASSIGNMENT = RateAssignment()
 """Sentinel for "no carrier matched". Phase 1 fallback uses this."""
@@ -528,22 +549,141 @@ class MovementPlannerService:
             rate_basis=best.rate_basis,
             base_rate=float(best.base_rate),
             distance_miles=distance_miles,
+            rate_card=best,
+            contract=contract,
+            # Phase 2A.1 — accessorials + fuel formula intentionally left
+            # empty. ChargeCalculator handles None gracefully (returns 0
+            # for those parts). Phase 3 will populate from contract.
+            accessorials=(),
+            fuel_formula=None,
         )
 
-    @staticmethod
-    def _lane_filter_matches(lane_filter: dict, lane_id: int) -> bool:
-        """Phase 2A simple lane-filter matcher.
+    def _lane_filter_matches(self, lane_filter: dict, lane_id: int) -> bool:
+        """Lane-filter matcher.
 
-        Returns True for catch-all empty filter or explicit lane_id
-        match. Phase 2B adds geographic shapes (origin_geo_id,
-        origin_state, origin_zip3, etc.) which require Core's geography
-        hierarchy — out of Phase 2A scope.
+        Phase 2A: catch-all empty filter or explicit ``lane_id`` match.
+        Phase 2A.2 / §3.38 item 3: geographic shapes — supports
+        ``origin_geo_id`` / ``dest_geo_id`` / ``origin_state`` /
+        ``dest_state`` / ``origin_zip3`` / ``dest_zip3`` / ``mode``.
+        Multiple shapes in one filter are AND-combined.
+
+        Resolution: requires the TransportationLane row + the lane's
+        from-/to-Site rows + their Geography rows. When the lookup
+        chain breaks (test fixtures, partial deployments), returns
+        ``False`` for unrecognised shapes (safer to miss than over-
+        match).
         """
         if not lane_filter:
             return True  # catch-all
-        if lane_filter.get("lane_id") == lane_id:
+
+        # Direct lane_id match (also serves as the Phase 2A pattern)
+        if "lane_id" in lane_filter:
+            if lane_filter["lane_id"] != lane_id:
+                return False
+
+        # Geographic shapes — defer the lookup until we know we need it.
+        geo_keys = {
+            "origin_geo_id", "dest_geo_id",
+            "origin_state", "dest_state",
+            "origin_zip3", "dest_zip3",
+            "mode",
+        }
+        needs_geo_resolution = any(k in lane_filter for k in geo_keys)
+        if not needs_geo_resolution:
+            # Only the lane_id shape was specified (already handled above).
             return True
-        return False
+
+        meta = self._resolve_lane_geography(lane_id)
+        if meta is None:
+            # Couldn't resolve — fail-closed (don't match).
+            return False
+
+        for key, expected in lane_filter.items():
+            if key == "lane_id":
+                continue  # already checked
+            actual = meta.get(key)
+            if actual is None or actual != expected:
+                return False
+        return True
+
+    def _resolve_lane_geography(self, lane_id: int) -> Optional[dict]:
+        """Resolve geographic metadata for a lane.
+
+        Returns ``{origin_geo_id, dest_geo_id, origin_state, dest_state,
+        origin_zip3, dest_zip3, mode}`` or ``None`` when the lookup
+        chain breaks. Caches per-lane (per-service-instance) so that
+        N items on the same lane share one DB roundtrip.
+        """
+        cache_key = ("lane_geography", lane_id)
+        cached = getattr(self, "_lane_geo_cache", {}).get(cache_key)
+        if cached is not None:
+            return cached if cached != "MISS" else None
+
+        if not hasattr(self, "_lane_geo_cache"):
+            self._lane_geo_cache = {}
+
+        try:
+            from azirella_data_model.master.config import TransportationLane
+        except ImportError:
+            self._lane_geo_cache[cache_key] = "MISS"
+            return None
+
+        lane = self.db.query(TransportationLane).filter_by(id=lane_id).first()
+        if lane is None:
+            self._lane_geo_cache[cache_key] = "MISS"
+            return None
+
+        meta: dict = {}
+
+        # Mode lookup via TMS-side LaneProfile (more accurate than
+        # transportation_lane).
+        try:
+            from app.models.transportation_config import LaneProfile
+            profile = (
+                self.db.query(LaneProfile)
+                .filter_by(lane_id=lane_id).first()
+            )
+            if profile is not None and profile.primary_mode:
+                meta["mode"] = profile.primary_mode
+        except Exception:
+            pass
+
+        # Origin / destination geography via Site → Geography.
+        for endpoint, prefix in (
+            (getattr(lane, "from_site_id", None), "origin"),
+            (getattr(lane, "to_site_id", None), "dest"),
+        ):
+            if endpoint is None:
+                continue
+            try:
+                from azirella_data_model.master.entities import Geography
+                from azirella_data_model.master.config import Site
+
+                site = self.db.query(Site).filter_by(id=endpoint).first()
+                if site is None:
+                    continue
+                geo_id = getattr(site, "geography_id", None)
+                if geo_id is not None:
+                    meta[f"{prefix}_geo_id"] = geo_id
+                    geo = self.db.query(Geography).filter_by(id=geo_id).first()
+                    if geo is not None:
+                        # State / region / postal_code — names vary by
+                        # AWS SC DM; check available attributes.
+                        for attr in ("state", "region", "country"):
+                            val = getattr(geo, attr, None)
+                            if val:
+                                meta[f"{prefix}_state"] = val
+                                break
+                        postal = getattr(geo, "postal_code", None) or getattr(site, "postal_code", None)
+                        if postal:
+                            zip3 = str(postal)[:3]
+                            meta[f"{prefix}_zip3"] = zip3
+            except Exception:
+                continue
+
+        result = meta if meta else "MISS"
+        self._lane_geo_cache[cache_key] = result
+        return meta if meta else None
 
     @staticmethod
     def _estimate_card_cost(
@@ -596,11 +736,59 @@ class MovementPlannerService:
     ) -> Optional[float]:
         """Apply the assigned rate basis to per-item parameters.
 
-        Differs from :meth:`_estimate_card_cost` in that the per-item
-        cost uses the actual weight / count where known.
+        Phase 2A.1 / §3.38 item 2: routes through Core's
+        ``ChargeCalculator`` (the canonical pure-math freight-charge
+        calculator from §3.29 Phase 3B) when the resolved rate card
+        and contract ORM refs are available. ChargeCalculator handles
+        the 5 rate bases consistently, applies min/max clamps, and
+        returns a structured ``ChargeBreakdown``.
+
+        Phase 2A.1 always passes ``accessorials=[]`` and
+        ``fuel_surcharge_formula=None`` because live accessorial-
+        conditions and fuel-index data aren't available at planning
+        time. ChargeCalculator returns 0 for those parts; the
+        linehaul amount equals what the inline math would compute.
+        Phase 3 will fetch real accessorial / fuel data from contract
+        relationships.
+
+        Falls back to the inline rate-basis math when ChargeCalculator
+        / Core's settlement substrate isn't importable (test fixtures,
+        partial deployments).
         """
         if assignment.rate_basis is None or assignment.base_rate is None:
             return None
+
+        # Try ChargeCalculator path (canonical Phase 2A.1 math).
+        if assignment.rate_card is not None and assignment.contract is not None:
+            try:
+                from azirella_data_model.settlement.charge_calculator import (
+                    ChargeCalculator,
+                )
+
+                calc = ChargeCalculator()
+                # ChargeCalculator expects weight in pounds (LTL convention).
+                # TransportationPlanItem.total_weight is also pounds (TMS
+                # convention; see app/models/tms_planning.py).
+                breakdown = calc.calculate(
+                    contract=assignment.contract,
+                    rate_card=assignment.rate_card,
+                    accessorials=list(assignment.accessorials) or [],
+                    fuel_surcharge_formula=assignment.fuel_formula,
+                    distance_miles=float(assignment.distance_miles or 0.0),
+                    weight_pounds=float(weight) if weight else None,
+                    pallet_count=None,  # Phase 2A.1: pallet count not tracked
+                    hours_on_trip=None,  # Phase 2A.1: hours not tracked
+                    fuel_index_value=None,  # Phase 3 wires real fuel data
+                    accessorial_conditions=None,  # Phase 3 wires real conditions
+                )
+                return float(breakdown.total_amount)
+            except Exception:
+                # ChargeCalculator unavailable / threw — fall through to
+                # inline math. This keeps Phase 2A.1 robust in test
+                # fixtures and partial deployments.
+                pass
+
+        # Inline fallback (matches the Phase 2A math).
         rb = assignment.rate_basis
         rate = assignment.base_rate
         if rb == "FLAT":
@@ -611,13 +799,12 @@ class MovementPlannerService:
             return round(rate * assignment.distance_miles, 2)
         if rb == "PER_HUNDREDWEIGHT":
             if not weight:
-                return round(rate * 10.0, 2)  # 1000-lb placeholder
-            # weight assumed in lbs (TransportationPlanItem.total_weight)
+                return round(rate * 10.0, 2)
             return round(rate * (weight / 100.0), 2)
         if rb == "PER_PALLET":
-            return round(rate, 2)  # 1-pallet placeholder
+            return round(rate, 2)
         if rb == "PER_HOUR":
-            return round(rate * 8.0, 2)  # 8-hour placeholder
+            return round(rate * 8.0, 2)
         return None
 
     def _lane_distance_miles(self, lane_id: int) -> Optional[float]:

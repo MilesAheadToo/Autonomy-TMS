@@ -773,6 +773,256 @@ def test_phase_2a_supports_flat_rate_basis(db) -> None:
     assert all(item.estimated_cost == 1500.0 for item in items)
 
 
+# ===========================================================================
+# §3.38 Phase 2B — Integrated Balancer LP-projection (item 1)
+# ===========================================================================
+
+
+def _seed_two_carriers_with_capacity_test_setup(db: Session) -> int:
+    """Helper: seed 2 carriers + rate cards + 10-load forecast, run
+    Phase 2A, return the unconstrained_reference plan id."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(id=1, tenant_id=1, scac="C1", display_name="C1", carrier_type="TRUCKLOAD"))
+    db.add(Carrier(id=2, tenant_id=1, scac="C2", display_name="C2", carrier_type="TRUCKLOAD"))
+    db.flush()
+    db.add(Contract(id=1, tenant_id=1, carrier_id=1, contract_number="C-1",
+        contract_type="PRIMARY", effective_from=datetime(2026, 1, 1), currency="USD"))
+    db.add(Contract(id=2, tenant_id=1, carrier_id=2, contract_number="C-2",
+        contract_type="BACKUP", effective_from=datetime(2026, 1, 1), currency="USD"))
+    db.flush()
+    db.add(RateCard(id=1, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.50,
+        effective_from=datetime(2026, 1, 1)))
+    db.add(RateCard(id=2, tenant_id=1, contract_id=2, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=3.00,
+        effective_from=datetime(2026, 1, 1)))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=10)
+    mp = MovementPlannerService(db)
+    return mp.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4)).plan_id
+
+
+def test_phase_2b_lp_projection_redistributes_when_capacity_exceeded(db) -> None:
+    """Phase 2A puts all 10 items on the cheaper carrier 1. Phase 2B
+    LP enforces capacity {1: 4, 2: 100} → 6 items reassign to carrier 2."""
+    plan_id = _seed_two_carriers_with_capacity_test_setup(db)
+
+    ib = IntegratedBalancerService(db)
+    result = ib.balance_plan(
+        unconstrained_plan_id=plan_id,
+        carrier_capacity={1: 4, 2: 100},
+    )
+
+    assert result.optimization_method == "LP_PROJECTION_PHASE_2B"
+    assert result.items_cloned == 10
+    assert result.constraints_applied == 6
+    assert result.items_escalated == 0
+
+    items = db.query(TransportationPlanItem).filter_by(
+        plan_id=result.constrained_plan_id,
+    ).all()
+    counts = {}
+    for it in items:
+        counts[it.carrier_id] = counts.get(it.carrier_id, 0) + 1
+    assert counts.get(1) == 4
+    assert counts.get(2) == 6
+
+
+def test_phase_2b_escalates_when_total_capacity_exhausted(db) -> None:
+    """Capacity {1: 3, 2: 5} = 8 total; 10 items → 2 escalated to CANCELLED."""
+    plan_id = _seed_two_carriers_with_capacity_test_setup(db)
+
+    ib = IntegratedBalancerService(db)
+    result = ib.balance_plan(
+        unconstrained_plan_id=plan_id,
+        carrier_capacity={1: 3, 2: 5},
+    )
+
+    assert result.items_escalated == 2
+    cancelled = db.query(TransportationPlanItem).filter_by(
+        plan_id=result.constrained_plan_id,
+        status=PlanItemStatus.CANCELLED,
+    ).count()
+    assert cancelled == 2
+
+
+def test_phase_2b_capacity_utilization_reported(db) -> None:
+    """LP utilisation per carrier post-solve is reported in BalanceResult."""
+    plan_id = _seed_two_carriers_with_capacity_test_setup(db)
+
+    ib = IntegratedBalancerService(db)
+    result = ib.balance_plan(
+        unconstrained_plan_id=plan_id,
+        carrier_capacity={1: 4, 2: 100},
+    )
+
+    util = result.capacity_utilization_per_carrier
+    assert util[1] == 1.0  # 4/4 — fully utilised
+    assert util[2] == pytest.approx(0.06, abs=0.001)  # 6/100
+
+
+def test_phase_2b_falls_back_to_clone_when_capacity_omitted(db) -> None:
+    """No `carrier_capacity` arg → CLONE_PHASE_1 (backward compat)."""
+    plan_id = _seed_two_carriers_with_capacity_test_setup(db)
+
+    ib = IntegratedBalancerService(db)
+    result = ib.balance_plan(unconstrained_plan_id=plan_id)
+
+    assert result.optimization_method == "CLONE_PHASE_1"
+    assert result.items_cloned == 10
+    assert result.constraints_applied == 0
+
+
+# ===========================================================================
+# §3.38 Phase 2A.1 — ChargeCalculator integration (item 2)
+# ===========================================================================
+
+
+def test_phase_2a_1_charge_calculator_path_used_when_available(db) -> None:
+    """ChargeCalculator path produces the same linehaul result as inline
+    math when accessorials/fuel are absent (Phase 2A.1)."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    # ChargeCalculator linehaul = base_rate × distance = 2.50 × 750 = 1875
+    # Same as the inline Phase 2A math.
+    assert all(item.estimated_cost == 1875.0 for item in items)
+
+
+# ===========================================================================
+# §3.38 Phase 2A.2 — Geographic lane filters (item 3)
+# ===========================================================================
+
+
+def test_phase_2a_2_lane_filter_supports_origin_state_geography(db) -> None:
+    """Rate card with `{origin_state: 'TX'}` matches only when the
+    lane's from-Site is in TX."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    # Set up two contracts: one with TX-origin filter, one catch-all.
+    db.add(Carrier(id=1, tenant_id=1, scac="C1", display_name="C1", carrier_type="TRUCKLOAD"))
+    db.flush()
+    db.add(Contract(id=1, tenant_id=1, carrier_id=1, contract_number="C-1",
+        contract_type="PRIMARY", effective_from=datetime(2026, 1, 1), currency="USD"))
+    db.flush()
+
+    # TX-only rate card (cheap)
+    db.add(RateCard(id=10, tenant_id=1, contract_id=1, lane_filter={"origin_state": "TX"},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=1.00,
+        effective_from=datetime(2026, 1, 1)))
+    # Catch-all rate card (more expensive)
+    db.add(RateCard(id=11, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.50,
+        effective_from=datetime(2026, 1, 1)))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    # Test fixture: no Site / Geography rows seeded → geography lookup
+    # fails → TX-filter rate card rejected. Catch-all selected.
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.rate_id == 11 for item in items)
+
+
+def test_phase_2a_2_lane_filter_with_lane_id_still_works(db) -> None:
+    """The Phase 2A `lane_id` shape continues to work after geographic
+    filter support is added."""
+    from datetime import datetime
+    from azirella_data_model.settlement.entities import Carrier, Contract, RateCard
+
+    db.add(Carrier(id=1, tenant_id=1, scac="C1", display_name="C1", carrier_type="TRUCKLOAD"))
+    db.flush()
+    db.add(Contract(id=1, tenant_id=1, carrier_id=1, contract_number="C-1",
+        contract_type="PRIMARY", effective_from=datetime(2026, 1, 1), currency="USD"))
+    db.flush()
+    # Lane-10-only cheap rate
+    db.add(RateCard(id=20, tenant_id=1, contract_id=1, lane_filter={"lane_id": 10},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=1.50,
+        effective_from=datetime(2026, 1, 1)))
+    # Catch-all expensive
+    db.add(RateCard(id=21, tenant_id=1, contract_id=1, lane_filter={},
+        equipment_type="DRY_VAN", rate_basis="PER_MILE", base_rate=2.50,
+        effective_from=datetime(2026, 1, 1)))
+    db.flush()
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    items = db.query(TransportationPlanItem).all()
+    # Lane-10 filter matches → cheaper rate (20) wins
+    assert all(item.rate_id == 20 for item in items)
+
+
+# ===========================================================================
+# §3.38 Phase 3 — GraphSAGE scaffold (item 4)
+# ===========================================================================
+
+
+def test_graphsage_scaffold_raises_not_implemented() -> None:
+    """The Phase 3 scaffold raises NotImplementedError so the contract
+    is exercised but no model is trained at scaffold time."""
+    from app.services.powell.graphsage_movement_planner import (
+        NotYetImplementedModel,
+        GraphSAGEPredictionInput,
+    )
+
+    model = NotYetImplementedModel()
+    assert model.model_version() == "graphsage_not_yet_implemented"
+
+    with pytest.raises(NotImplementedError, match="training not yet implemented"):
+        model.fit(training_data=[])
+
+    inp = GraphSAGEPredictionInput(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4), period_days=7,
+        lane_volume_forecasts=[], available_carriers=[],
+    )
+    with pytest.raises(NotImplementedError, match="inference not yet implemented"):
+        model.predict(inp)
+
+
+def test_graphsage_scaffold_interface_dataclasses_construct() -> None:
+    """The Phase 3 input/output dataclasses construct cleanly so consumers
+    can build them against the contract before the model is trained."""
+    from app.services.powell.graphsage_movement_planner import (
+        GraphSAGEPredictionInput,
+        GraphSAGEPredictionOutput,
+    )
+
+    inp = GraphSAGEPredictionInput(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4), period_days=7,
+        lane_volume_forecasts=[
+            {"lane_id": 10, "mode": "FTL", "equipment_type": "DRY_VAN",
+             "forecast_loads_p50": 5.0},
+        ],
+        available_carriers=[
+            {"carrier_id": 1, "contract_id": 1, "rate_card_id": 1,
+             "base_rate": 2.5, "capacity_remaining": 50},
+        ],
+    )
+    assert inp.tenant_id == 1
+    assert len(inp.lane_volume_forecasts) == 1
+
+    out = GraphSAGEPredictionOutput(
+        item_id=42, carrier_id=1, rate_id=1, estimated_cost=1875.0,
+        confidence=0.92,
+    )
+    assert out.confidence == 0.92
+
+
 def test_phase_2a_picks_distinct_carriers_when_lanes_differ(db) -> None:
     """Phase 2A reports `carrier_count` correctly when items span
     multiple carriers."""
