@@ -41,7 +41,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.tms_planning import (
+from azirella_data_model.transport_plan import (
     PlanStatus,
     TransportationPlan,
     TransportationPlanItem,

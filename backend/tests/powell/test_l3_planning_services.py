@@ -31,7 +31,7 @@ from azirella_data_model.transport_plan import (
     LaneVolumePlan,
 )
 
-from app.models.tms_planning import (
+from azirella_data_model.transport_plan import (
     PlanItemStatus,
     PlanStatus,
     TransportationPlan,

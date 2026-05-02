@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.tms_planning import TransportationPlan, TransportationPlanItem
+from azirella_data_model.transport_plan import TransportationPlan, TransportationPlanItem
 from app.models.tms_entities import TransportMode, EquipmentType
 
 logger = logging.getLogger(__name__)
