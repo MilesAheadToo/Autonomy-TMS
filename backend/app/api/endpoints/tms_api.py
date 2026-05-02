@@ -45,7 +45,7 @@ from app.models.tms_entities import (
     ShipmentStatus,
     TransportMode,
 )
-from app.models.tms_planning import TransportationPlan, TransportationPlanItem
+from azirella_data_model.transport_plan import TransportationPlan, TransportationPlanItem
 from app.models.transportation_config import FacilityConfig, LaneProfile
 from app.models.supply_chain_config import Site, TransportationLane, SupplyChainConfig
 

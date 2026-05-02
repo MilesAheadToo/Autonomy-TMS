@@ -52,16 +52,10 @@ class ForecastMethod(str, PyEnum):
     CONFORMAL = "CONFORMAL"           # Conformal prediction (P10/P50/P90)
 
 
-class PlanStatus(str, PyEnum):
-    """Transportation plan lifecycle"""
-    DRAFT = "DRAFT"
-    OPTIMIZING = "OPTIMIZING"
-    READY = "READY"
-    APPROVED = "APPROVED"
-    EXECUTING = "EXECUTING"
-    COMPLETED = "COMPLETED"
-    SUPERSEDED = "SUPERSEDED"
-
+# PlanStatus + PlanItemStatus moved to Core 2026-05-02 per §3.39
+# (canonical-state enum vocabulary parallels supply_plan).
+# See Autonomy-Core docs/MIGRATION_REGISTER.md §3.39 for the rationale.
+from azirella_data_model.transport_plan import PlanItemStatus, PlanStatus  # noqa: F401
 
 from azirella_data_model.optimization.plan_versions import PlanVersion, is_constrained_for_version  # noqa: E402
 
@@ -70,17 +64,6 @@ from azirella_data_model.optimization.plan_versions import PlanVersion, is_const
 # decision records labelled `constrained_live` for UI continuity. Flip
 # to True when the Integrated Balancer lands (Phase 3).
 PLANNING_IS_CONSTRAINED = False
-
-
-class PlanItemStatus(str, PyEnum):
-    """Individual planned load status"""
-    PLANNED = "PLANNED"
-    CARRIER_ASSIGNED = "CARRIER_ASSIGNED"
-    TENDERED = "TENDERED"
-    CONFIRMED = "CONFIRMED"
-    IN_EXECUTION = "IN_EXECUTION"
-    COMPLETED = "COMPLETED"
-    CANCELLED = "CANCELLED"
 
 
 # ============================================================================
@@ -224,154 +207,3 @@ class CapacityTarget(Base):
     )
 
 
-# ============================================================================
-# Transportation Plan (Execution Plan — replaces MPS)
-# ============================================================================
-
-class TransportationPlan(Base):
-    """
-    Transportation Plan of Record — the master execution plan
-    TMS Entity: transportation_plan
-    Maps to MPS/SupplyPlan in SC context
-
-    Generated daily by the planning cascade (S&OP → Capacity → LoadBuild → Assign).
-    Contains planned loads with carrier assignments.
-    """
-    __tablename__ = "transportation_plan"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_id = Column(Integer, ForeignKey("supply_chain_configs.id", ondelete="CASCADE"), nullable=False)
-    # `plan_version` is the honest label for what this row represents:
-    #   unconstrained_reference — Demand Potential or Unconstrained Movement Plan
-    #   constrained_live        — Constrained Committed Plan (today's agent-written plan;
-    #                              until the Integrated Balancer ships, this is really a
-    #                              decision record — see docs/TACTICAL_PLANNING_REARCHITECTURE.md)
-    #   erp_baseline            — External TMS / ERP plan, for comparison
-    #   decision_action         — User-authored override plan
-    # Kept as String (not Enum) so the values can evolve without Alembic churn; the
-    # canonical enum is `app.models.tms_planning.PlanVersion`.
-    plan_version = Column(String(30), nullable=False, default="constrained_live")
-    plan_name = Column(String(200))
-
-    status = Column(SAEnum(PlanStatus, name="plan_status_enum"), nullable=False, default=PlanStatus.DRAFT)
-
-    # Planning horizon
-    plan_start_date = Column(Date, nullable=False)
-    plan_end_date = Column(Date, nullable=False)
-    planning_horizon_days = Column(Integer)
-
-    # Summary metrics (aggregated from plan items)
-    total_planned_loads = Column(Integer, default=0)
-    total_planned_shipments = Column(Integer, default=0)
-    total_estimated_cost = Column(Double, default=0)
-    total_estimated_miles = Column(Double, default=0)
-    avg_cost_per_mile = Column(Double)
-    avg_utilization_pct = Column(Double, comment="Average load utilization %")
-    carrier_count = Column(Integer, comment="Number of distinct carriers assigned")
-
-    # Optimization metadata
-    optimization_method = Column(String(50), comment="AGENT, MANUAL, HYBRID")
-    optimization_score = Column(Double, comment="Overall plan quality 0-1")
-    optimization_duration_sec = Column(Double, comment="Time to generate plan")
-    optimization_metadata = Column(JSON)
-
-    # Comparison to baseline
-    cost_vs_baseline_pct = Column(Double, comment="% cost change vs tms_baseline")
-    service_vs_baseline_pct = Column(Double, comment="% OTD change vs tms_baseline")
-
-    # Approval
-    approved_by_user_id = Column(Integer, ForeignKey("users.id"))
-    approved_at = Column(DateTime)
-
-    # Generation
-    generated_by = Column(String(20), comment="AGENT, USER, SCHEDULED")
-    cascade_run_id = Column(String(100), comment="Planning cascade execution ID")
-
-    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    config = relationship("SupplyChainConfig")
-    items = relationship("TransportationPlanItem", back_populates="plan", cascade="all, delete-orphan")
-
-    __table_args__ = (
-        Index('idx_transport_plan_lookup', 'config_id', 'plan_version', 'status'),
-        Index('idx_transport_plan_dates', 'tenant_id', 'plan_start_date', 'plan_end_date'),
-    )
-
-
-class TransportationPlanItem(Base):
-    """
-    Individual planned load within a transportation plan
-    TMS Entity: transportation_plan_item
-    Maps to MPSPlanItem in SC context
-
-    Each item represents a planned movement: shipments consolidated into a load,
-    assigned to a carrier, with estimated cost and timing.
-    """
-    __tablename__ = "transportation_plan_item"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    plan_id = Column(Integer, ForeignKey("transportation_plan.id", ondelete="CASCADE"), nullable=False)
-
-    # Route
-    origin_site_id = Column(Integer, ForeignKey("site.id"), nullable=False)
-    destination_site_id = Column(Integer, ForeignKey("site.id"), nullable=False)
-    lane_id = Column(Integer, ForeignKey("transportation_lane.id"))
-    mode = Column(String(20), nullable=False)
-    equipment_type = Column(String(30))
-
-    # Assignment
-    carrier_id = Column(Integer, ForeignKey("carrier.id"))
-    rate_id = Column(Integer, ForeignKey("freight_rate.id"))
-    status = Column(SAEnum(PlanItemStatus, name="plan_item_status_enum"),
-                    nullable=False, default=PlanItemStatus.PLANNED)
-
-    # Timing
-    planned_pickup_date = Column(DateTime, nullable=False)
-    planned_delivery_date = Column(DateTime, nullable=False)
-
-    # Volume
-    shipment_count = Column(Integer, default=1)
-    total_weight = Column(Double)
-    total_volume = Column(Double)
-    total_pallets = Column(Integer)
-    utilization_pct = Column(Double)
-
-    # Cost
-    estimated_cost = Column(Double)
-    estimated_cost_per_mile = Column(Double)
-    distance_miles = Column(Double)
-
-    # Multi-stop
-    stops = Column(JSON, comment='[{"site_id": 1, "type": "PICKUP"}, {"site_id": 2, "type": "DELIVERY"}]')
-    is_multi_stop = Column(Boolean, default=False)
-
-    # Linked execution records (populated when plan executes)
-    load_id = Column(Integer, ForeignKey("load.id"))
-    shipment_ids = Column(JSON, comment="List of shipment IDs consolidated into this load")
-
-    # Agent decision
-    agent_decision_id = Column(String(100), comment="FK to powell_decisions")
-    selection_rationale = Column(JSON, comment='{"carrier_score": 0.92, "cost_rank": 1, ...}')
-
-    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    plan = relationship("TransportationPlan", back_populates="items")
-    origin = relationship("Site", foreign_keys=[origin_site_id])
-    destination = relationship("Site", foreign_keys=[destination_site_id])
-    lane = relationship("TransportationLane")
-    carrier = relationship("Carrier")
-    rate = relationship("FreightRate")
-    load = relationship("Load")
-
-    __table_args__ = (
-        Index('idx_plan_item_plan', 'plan_id', 'status'),
-        Index('idx_plan_item_dates', 'planned_pickup_date', 'planned_delivery_date'),
-        Index('idx_plan_item_carrier', 'carrier_id', 'status'),
-        Index('idx_plan_item_lane', 'lane_id', 'mode'),
-    )
