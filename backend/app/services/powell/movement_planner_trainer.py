@@ -153,11 +153,13 @@ class MovementPlannerTrainer:
         kwargs.setdefault("learning_rate", learning_rate)
         model = TorchGraphSAGEMovementPlanner(**kwargs)
 
-        # Convert examples to per-plan training batches.
+        # Convert examples to per-plan training batches. Call
+        # ``model.fit`` unconditionally — when the batch list is
+        # empty the model itself short-circuits and sets its
+        # ``model_version`` to ``"graphsage_no_training_data"``,
+        # which is the state the no-examples result should reflect.
         train_batches = self._examples_to_training_batches(train_examples)
-
-        if train_batches:
-            model.fit(train_batches)
+        model.fit(train_batches)
 
         # Held-out val loss (basic; Phase 3.5 adds proper metrics).
         val_loss: Optional[float] = None
