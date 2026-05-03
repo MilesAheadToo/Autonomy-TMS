@@ -233,23 +233,22 @@ No code changes.
 
 ### 5.B — Cut the SCP-shape pipeline from TMS
 
-**Proposed plan, pending user confirmation.** Three coordinated deletes:
+Concrete plan, finalised 2026-05-03 after the open questions above were
+resolved:
 
-1. Delete [`backend/app/services/deployment_pipeline_service.py`](../backend/app/services/deployment_pipeline_service.py).
-2. Delete [`backend/scripts/training/train_food_dist_models.py`](../backend/scripts/training/train_food_dist_models.py).
-3. Delete [`backend/app/services/simulation_data_converter.py`](../backend/app/services/simulation_data_converter.py).
+1. **Delete** [`backend/app/services/deployment_pipeline_service.py`](../backend/app/services/deployment_pipeline_service.py) (535 lines).
+2. **Delete** [`backend/scripts/training/train_food_dist_models.py`](../backend/scripts/training/train_food_dist_models.py) (388 lines).
+3. **Delete** [`backend/app/services/simulation_data_converter.py`](../backend/app/services/simulation_data_converter.py) (738 lines).
+4. **In** [`backend/app/api/endpoints/deployment.py`](../backend/app/api/endpoints/deployment.py): delete the orchestration routes — `POST /pipelines` (line 127), `GET /pipelines` (line 169), `GET /pipelines/{id}` (line 203), `GET /pipelines/{id}/steps/{step}` (line 221), `POST /pipelines/{id}/cancel` (line 255). **Keep** `GET /csvs/{pipeline_id}` (line 283) and `GET /csvs/{pipeline_id}/{csv_type}` (line 329) — these read SAP CSV exports the user salvages per Q2.
+5. **Keep** [`backend/app/models/deployment_pipeline.py`](../backend/app/models/deployment_pipeline.py) and the `deployment_pipeline_run` table — the `/csvs/...` endpoints look up by `pipeline_id` so the table stays as the audit trail. (If a future PR proves the CSV endpoints can be parameterised on `config_id` instead, the table can drop then.)
+6. **Audit** [`PowellTrainingService.train_sop_graphsage`](../backend/app/services/powell/powell_training_service.py) and `.train_execution_tgnn`. Both are called only from the deletees. If grep confirms no other TMS caller, delete those methods too. (Non-blocking — they can stay as dead-but-not-harmful code if removing them turns out to touch more surface than expected.)
+7. **Audit** [`backend/app/services/dag_simulator.py`](../backend/app/services/dag_simulator.py) (the deterministic SCP simulator) — it's referenced by the deletees plus a `replay_history`-style usage in SCP. Likely also SCP-fork residue but lower priority and out of 5.B's scope; flag for a follow-up.
 
-Plus the cleanup tail:
+**Open questions — resolved 2026-05-03:**
 
-4. Either delete [`backend/app/api/endpoints/deployment.py`](../backend/app/api/endpoints/deployment.py) entirely, or strip out the routes that depended on `DeploymentPipelineService` (`POST /pipelines`, list, detail, cancel) and keep only `GET /csvs/{pipeline_id}` + `GET /csvs/{pipeline_id}/{csv_type}` if the SAP CSV exports retain value standalone.
-5. Audit the [`DeploymentPipelineRun`](../backend/app/models/deployment_pipeline.py) ORM + table — keep if still useful as a deployment audit trail; drop the table via Alembic if not.
-6. Audit [`PowellTrainingService.train_sop_graphsage`](../backend/app/services/powell/powell_training_service.py) and `.train_execution_tgnn` — these are called only from the deletees. If no TMS-side caller exists, delete them too.
-
-**Open questions for the user before this lands:**
-
-1. Is the **`POST /api/deployment/pipelines` endpoint** wired to any UI / customer-facing integration on msi-stealth's frontend work? If yes, the front-end side needs a coordinated retirement.
-2. Are the **SAP CSV exports** at Steps 6–7 used independently of Steps 1–5? If yes, salvage `SAPCSVExporter` + the `/csvs/...` endpoints; if no, drop everything.
-3. Are there any **non-TMS demos** (SCP fork still in use somewhere?) that consume the SCP-shape NPZ artefacts these pipelines emit? Unlikely given the SCP repo has its own equivalents, but worth confirming.
+1. **Frontend integration of `POST /api/deployment/pipelines`?** **None.** Verified by grep across `Autonomy-TMS/frontend/src`, `Autonomy-Core`, `Autonomy-DP`, and TMS-side docs / Makefiles / compose files / shell scripts: zero references to `/api/deployment/pipelines`, `DeploymentPipeline*`, or `deployment_pipeline*` outside of this audit and the audited callers themselves. (SCP-readonly has equivalents — its own copies, not TMS's concern.) → **Safe to delete the orchestration routes.**
+2. **SAP CSV exports useful standalone?** **Yes** — confirmed; salvage `SAPCSVExporter` and the read-only CSV endpoints. The `DeploymentPipelineRun` ORM + table stay (the CSV endpoints look up by `pipeline_id`), but the **write-side** routes (`POST /pipelines`, list / detail / cancel) go.
+3. **Non-TMS demos consuming the SCP-shape NPZ artefacts?** **No.** → Delete the artefacts cleanly; no salvage required.
 
 ### 5.C — Delete `dag_simpy_simulator.py`
 
