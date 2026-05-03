@@ -20,11 +20,18 @@ Two endpoints:
 
 Both endpoints honour the same idempotency the runner enforces (an
 existing L3 plan for the period skips with status="SKIPPED" unless
-``force=true``). Auth: ``get_current_active_user`` — any authenticated
-user can trigger a cascade for their own tenant; cross-tenant invocation
-requires the request body's ``tenant_id`` to match the user's
-``tenant_id`` (or the user is a superuser, when that machinery exists
-— Phase 5 follow-on).
+``force=true``).
+
+Auth (§3.46 Phase 4 + Phase 5 — 2026-05-03):
+``get_current_active_user`` is required. Cross-tenant invocation
+requires *operator-level* authority — either ``is_superuser=True``
+or ``user_type == UserTypeEnum.SYSTEM_ADMIN``. ``TENANT_ADMIN`` is
+explicitly NOT operator-level: a tenant admin's authority is scoped
+to *their own* tenant and they get the same same-tenant constraint
+as a regular user. This matches how cross-tenant operations are
+authorised elsewhere (see ``app/api/deps.py::require_tenant_admin``,
+which gates on tenant-scope; the cascade's cross-tenant flavour
+needs the strictly broader system-level role).
 
 Plane-module placement: TMS-side decision-policy surface (mirrors
 ``scripts/l3_cascade_cli.py`` which is also TMS plane-specific). No
@@ -41,6 +48,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_active_user
+from app.services._l3_cascade_auth import (
+    enforce_tenant_scope as _enforce_tenant_scope,
+    is_operator as _is_operator,
+)
 from app.db.session import get_db, sync_session_factory
 from app.models.user import User
 from app.services.powell.l3_cascade_runner import (
@@ -167,24 +178,6 @@ def _to_response(result: CascadeRunResult) -> L3CascadeRunResponse:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _enforce_tenant_scope(user: User, requested_tenant_id: int) -> None:
-    """Caller may only invoke cascades for their own tenant.
-
-    Cross-tenant invocation needs the operator role (Phase 5 follow-on
-    when role-based authority is wired in). For now, strict
-    same-tenant enforcement.
-    """
-    user_tenant = getattr(user, "tenant_id", None)
-    if user_tenant is not None and user_tenant != requested_tenant_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"User tenant_id={user_tenant} cannot invoke cascade "
-                f"for tenant_id={requested_tenant_id}"
-            ),
-        )
 
 
 def _resolve_config_id(
