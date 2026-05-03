@@ -51,6 +51,7 @@ ExceptionResult = _les.ExceptionResult
 ExceptionType = _les.ExceptionType
 AIIOMode = _les.AIIOMode
 LATE_ARRIVAL_BAND_RISK_THRESHOLD_MIN = _les.LATE_ARRIVAL_BAND_RISK_THRESHOLD_MIN
+_build_decision_payload = _les._build_decision_payload
 
 
 def _now() -> datetime:
@@ -385,3 +386,201 @@ class TestAIIOBands:
         assert svc._classify_aiio(0.65) == AIIOMode.INSPECT
         assert svc._classify_aiio(0.9) == AIIOMode.INSPECT
         assert svc._classify_aiio(1.0) == AIIOMode.INSPECT
+
+
+# ---------------------------------------------------------------------------
+# _build_decision_payload — Slice 2 Decision Stream payload builder
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDecisionPayload:
+    def test_late_arrival_payload_has_reroute_action(self):
+        exc = ExceptionResult(
+            exception_type=ExceptionType.LATE_ARRIVAL_DETECTED,
+            tracked_entity_id=10,
+            tenant_id=100,
+            detected_at=_now(),
+            urgency=0.5,
+            aiio_mode=AIIOMode.INFORM,
+            reason_text="ETA P50 slipped past promised by 240 min.",
+            source_eta_id=42,
+            metadata={"slip_minutes": 240.0, "model_name": "tabnet_v2"},
+        )
+        payload = _build_decision_payload(exc)
+        assert payload["action_name"] == "LATE_ARRIVAL_REROUTE"
+        assert payload["urgency"] == 0.5
+        assert payload["reasoning"].startswith("ETA P50")
+        assert payload["confidence"] == 1.0
+        assert payload["exception_type"] == "LATE_ARRIVAL_DETECTED"
+        assert payload["aiio_mode"] == "INFORM"
+        assert payload["source_eta_id"] == 42
+        assert "source_event_id" not in payload
+        assert payload["scoring_detail"]["slip_minutes"] == 240.0
+        assert payload["scoring_detail"]["model_name"] == "tabnet_v2"
+
+    def test_dwell_breach_payload_has_dispatch_action(self):
+        exc = ExceptionResult(
+            exception_type=ExceptionType.DWELL_BREACH_ALERT,
+            tracked_entity_id=20,
+            tenant_id=200,
+            detected_at=_now(),
+            urgency=0.85,
+            aiio_mode=AIIOMode.INSPECT,
+            reason_text="Dwell breach: tracked entity over threshold.",
+            source_event_id=99,
+            metadata={"breach_seconds": 12000, "event_type": "EXIT"},
+        )
+        payload = _build_decision_payload(exc)
+        assert payload["action_name"] == "DWELL_BREACH_DISPATCH"
+        assert payload["urgency"] == 0.85
+        assert payload["aiio_mode"] == "INSPECT"
+        assert payload["source_event_id"] == 99
+        assert "source_eta_id" not in payload
+        assert payload["scoring_detail"]["breach_seconds"] == 12000
+        assert payload["scoring_detail"]["event_type"] == "EXIT"
+
+    def test_payload_metadata_isolated_from_source(self):
+        # Mutating the returned scoring_detail must not affect the
+        # original ExceptionResult.metadata (defensive copy).
+        original_metadata = {"slip_minutes": 30.0}
+        exc = ExceptionResult(
+            exception_type=ExceptionType.LATE_ARRIVAL_DETECTED,
+            tracked_entity_id=11,
+            tenant_id=100,
+            detected_at=_now(),
+            urgency=0.1,
+            aiio_mode=AIIOMode.AUTOMATE,
+            reason_text="...",
+            source_eta_id=1,
+            metadata=original_metadata,
+        )
+        payload = _build_decision_payload(exc)
+        payload["scoring_detail"]["slip_minutes"] = 999.0
+        assert exc.metadata["slip_minutes"] == 30.0
+
+
+# ---------------------------------------------------------------------------
+# apply_to_decision_stream — wire-up to record_trm_decision
+# ---------------------------------------------------------------------------
+
+
+class TestApplyToDecisionStream:
+    """The method wraps record_trm_decision; we monkeypatch the writer
+    and verify the per-exception arguments. The downstream SQL path is
+    covered by record_trm_decision's own integration tests.
+    """
+
+    def test_records_each_exception(self, monkeypatch):
+        captured = []
+
+        def fake_record(db, **kwargs):
+            captured.append(kwargs)
+            return 1000 + len(captured)
+
+        # Stub agent_decision_writer module before the method imports it.
+        import sys
+        import types
+        adw_stub = types.ModuleType(
+            "app.services.powell.agent_decision_writer"
+        )
+        adw_stub.record_trm_decision = fake_record
+        monkeypatch.setitem(
+            sys.modules, "app.services.powell.agent_decision_writer", adw_stub
+        )
+
+        svc = LiveExceptionService()
+        excs = [
+            ExceptionResult(
+                exception_type=ExceptionType.LATE_ARRIVAL_DETECTED,
+                tracked_entity_id=1,
+                tenant_id=100,
+                detected_at=_now(),
+                urgency=0.4,
+                aiio_mode=AIIOMode.INFORM,
+                reason_text="Late arrival",
+                source_eta_id=10,
+                metadata={"slip_minutes": 192.0},
+            ),
+            ExceptionResult(
+                exception_type=ExceptionType.DWELL_BREACH_ALERT,
+                tracked_entity_id=2,
+                tenant_id=100,
+                detected_at=_now(),
+                urgency=0.8,
+                aiio_mode=AIIOMode.INSPECT,
+                reason_text="Dwell breach",
+                source_event_id=20,
+                metadata={"breach_seconds": 11520},
+            ),
+        ]
+        ids = svc.apply_to_decision_stream(db=None, exceptions=excs)
+        assert ids == [1001, 1002]
+        assert len(captured) == 2
+        # Late-arrival call
+        assert captured[0]["trm_type"] == "exception_management"
+        assert captured[0]["tenant_id"] == 100
+        assert captured[0]["item_code"] == "entity-1"
+        assert captured[0]["category"] == "LATE_ARRIVAL_DETECTED"
+        assert captured[0]["impact_value"] == 0.4
+        assert captured[0]["result"]["action_name"] == "LATE_ARRIVAL_REROUTE"
+        assert captured[0]["result"]["source_eta_id"] == 10
+        # Dwell-breach call
+        assert captured[1]["item_code"] == "entity-2"
+        assert captured[1]["category"] == "DWELL_BREACH_ALERT"
+        assert captured[1]["result"]["action_name"] == "DWELL_BREACH_DISPATCH"
+        assert captured[1]["result"]["source_event_id"] == 20
+
+    def test_skips_writer_failures(self, monkeypatch):
+        # record_trm_decision returns None on failure; apply_to_decision_stream
+        # filters those out instead of including null IDs.
+        def fake_record(db, **kwargs):
+            return None if kwargs["item_code"] == "entity-1" else 42
+
+        import sys
+        import types
+        adw_stub = types.ModuleType(
+            "app.services.powell.agent_decision_writer"
+        )
+        adw_stub.record_trm_decision = fake_record
+        monkeypatch.setitem(
+            sys.modules, "app.services.powell.agent_decision_writer", adw_stub
+        )
+
+        svc = LiveExceptionService()
+        excs = [
+            ExceptionResult(
+                exception_type=ExceptionType.LATE_ARRIVAL_DETECTED,
+                tracked_entity_id=1, tenant_id=100,
+                detected_at=_now(), urgency=0.4, aiio_mode=AIIOMode.INFORM,
+                reason_text="...", source_eta_id=10, metadata={},
+            ),
+            ExceptionResult(
+                exception_type=ExceptionType.DWELL_BREACH_ALERT,
+                tracked_entity_id=2, tenant_id=100,
+                detected_at=_now(), urgency=0.5, aiio_mode=AIIOMode.INFORM,
+                reason_text="...", source_event_id=20, metadata={},
+            ),
+        ]
+        ids = svc.apply_to_decision_stream(db=None, exceptions=excs)
+        assert ids == [42]
+
+    def test_empty_list_is_no_op(self, monkeypatch):
+        called = []
+
+        def fake_record(db, **kwargs):
+            called.append(kwargs)
+            return 1
+
+        import types
+        adw_stub = types.ModuleType(
+            "app.services.powell.agent_decision_writer"
+        )
+        adw_stub.record_trm_decision = fake_record
+        monkeypatch.setitem(
+            sys.modules, "app.services.powell.agent_decision_writer", adw_stub
+        )
+
+        svc = LiveExceptionService()
+        ids = svc.apply_to_decision_stream(db=None, exceptions=[])
+        assert ids == []
+        assert called == []

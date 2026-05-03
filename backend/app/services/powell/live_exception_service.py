@@ -460,9 +460,98 @@ class LiveExceptionService:
 
         return results
 
+    # ------------------------------------------------------------------
+    # Decision Stream surface (Slice 2)
+    # ------------------------------------------------------------------
+
+    def apply_to_decision_stream(
+        self,
+        db: Session,
+        exceptions: List[ExceptionResult],
+    ) -> List[int]:
+        """Persist each ``ExceptionResult`` as an ``AgentDecision`` row.
+
+        Routes through :func:`record_trm_decision` with
+        ``trm_type='exception_management'`` so the row lands in the
+        canonical ``core.agent_decisions`` table the Decision Stream UI
+        already reads from. Audit-link IDs (``source_event_id`` /
+        ``source_eta_id``) ride along in ``context_data`` JSON for
+        drilldown.
+
+        Action-name mapping (drives the recommendation chip in the UI):
+
+          - LATE_ARRIVAL_DETECTED → ``LATE_ARRIVAL_REROUTE``
+          - DWELL_BREACH_ALERT    → ``DWELL_BREACH_DISPATCH``
+
+        Recovery options (reroute / hold / contact-customer) are
+        surfaced via the existing Decision Stream override flow —
+        the planner picks one and the override is captured against
+        the AgentDecision row, same as every other TRM decision.
+
+        Returns the list of newly-written ``AgentDecision.id`` values
+        (skipping any rows that failed to write — `record_trm_decision`
+        is non-fatal and returns ``None`` on error).
+        """
+        from app.services.powell.agent_decision_writer import record_trm_decision
+
+        ids: List[int] = []
+        for exc in exceptions:
+            result = _build_decision_payload(exc)
+            row_id = record_trm_decision(
+                db,
+                tenant_id=exc.tenant_id,
+                trm_type="exception_management",
+                result=result,
+                item_code=f"entity-{exc.tracked_entity_id}",
+                item_name=f"Tracked entity {exc.tracked_entity_id}",
+                category=exc.exception_type.value,
+                impact_value=exc.urgency,
+                impact_description=exc.reason_text[:255],
+            )
+            if row_id is not None:
+                ids.append(row_id)
+        return ids
+
 
 # ---------------------------------------------------------------------------
 # Helpers
+# ---------------------------------------------------------------------------
+
+
+_EXCEPTION_ACTION_NAMES = {
+    ExceptionType.LATE_ARRIVAL_DETECTED: "LATE_ARRIVAL_REROUTE",
+    ExceptionType.DWELL_BREACH_ALERT: "DWELL_BREACH_DISPATCH",
+}
+
+
+def _build_decision_payload(exc: ExceptionResult) -> dict:
+    """Translate an ``ExceptionResult`` into the ``result`` dict
+    ``record_trm_decision`` expects.
+
+    The substrate audit links (``source_event_id`` /
+    ``source_eta_id``) and exception metadata flow into
+    ``context_data`` so Decision Stream drilldown can show what
+    GeofenceEvent / ETAEstimate row triggered the exception.
+    """
+    payload = {
+        "action_name": _EXCEPTION_ACTION_NAMES[exc.exception_type],
+        "reasoning": exc.reason_text,
+        "confidence": 1.0,  # Detection is deterministic — confidence is in the urgency band, not the detection itself.
+        "urgency": exc.urgency,
+        "exception_type": exc.exception_type.value,
+        "aiio_mode": exc.aiio_mode.value,
+        "detected_at": _to_iso(exc.detected_at),
+        "scoring_detail": dict(exc.metadata),
+    }
+    if exc.source_event_id is not None:
+        payload["source_event_id"] = exc.source_event_id
+    if exc.source_eta_id is not None:
+        payload["source_eta_id"] = exc.source_eta_id
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Datetime helpers
 # ---------------------------------------------------------------------------
 
 
