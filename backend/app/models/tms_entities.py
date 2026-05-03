@@ -45,6 +45,11 @@ from typing import Optional
 from enum import Enum as PyEnum
 from .base import Base
 
+# §3.47 — Core owns canonical carrier identity. Re-export so existing
+# `from app.models.tms_entities import ..., Carrier, ...` callsites
+# keep working; new code can import from Core directly.
+from azirella_data_model.settlement.entities import Carrier  # noqa: F401
+
 
 # ============================================================================
 # Enums
@@ -311,75 +316,21 @@ class Commodity(Base):
 # Carrier & Equipment Entities
 # ============================================================================
 
-class Carrier(Base):
-    """
-    Transportation carrier / capacity provider
-    TMS Entity: carrier
-    Maps to Site(MARKET_SUPPLY) in SC context — provides capacity rather than goods
-
-    Extends TradingPartner with carrier-specific attributes.
-    """
-    __tablename__ = "carrier"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(100), nullable=False, comment="Carrier SCAC or internal code")
-    name = Column(String(200), nullable=False)
-    carrier_type = Column(SAEnum(CarrierType, name="carrier_type_enum"), nullable=False)
-    scac = Column(String(10), comment="Standard Carrier Alpha Code")
-    mc_number = Column(String(20), comment="Motor Carrier number (FMCSA)")
-    dot_number = Column(String(20), comment="USDOT number")
-    usdot_safety_rating = Column(String(20), comment="Satisfactory/Conditional/Unsatisfactory")
-
-    # Capabilities
-    modes = Column(JSON, comment='Supported modes: ["FTL", "LTL", "DRAYAGE"]')
-    equipment_types = Column(JSON, comment='Supported equipment: ["DRY_VAN", "REEFER"]')
-    service_regions = Column(JSON, comment='Geographic coverage: ["US_DOMESTIC", "US_MX", "TRANSPACIFIC"]')
-    is_hazmat_certified = Column(Boolean, default=False)
-    is_bonded = Column(Boolean, default=False)
-    insurance_limit = Column(Double, comment="Cargo insurance limit (USD)")
-
-    # Contact
-    primary_contact_name = Column(String(200))
-    primary_contact_email = Column(String(200))
-    primary_contact_phone = Column(String(50))
-    dispatch_email = Column(String(200))
-    dispatch_phone = Column(String(50))
-    tracking_api_type = Column(String(50), comment="EDI, API, PORTAL, P44, FOURKITES")
-    tracking_api_config = Column(JSON, comment="API credentials and endpoint config")
-
-    # Status
-    is_active = Column(Boolean, default=True)
-    onboarding_status = Column(String(20), default="PENDING", comment="PENDING, IN_PROGRESS, ACTIVE, SUSPENDED")
-    onboarding_date = Column(Date)
-    last_shipment_date = Column(Date)
-
-    # Source tracking
-    source = Column(String(100))
-    external_identifiers = Column(JSON, nullable=True, comment="Typed external IDs: {sap_vendor, p44_id, ...}")
-
-    # p44 integration (aligned with CapacityProviderIdentifier schema)
-    p44_carrier_id = Column(String(100), comment="project44 carrier identifier")
-    p44_identifier_type = Column(String(20), comment="P44 CapacityProviderIdentifier.type: SCAC, DOT_NUMBER, MC_NUMBER, P44_EU, P44_GLOBAL, VAT, SYSTEM")
-    p44_account_group_code = Column(String(100), comment="P44 CapacityProviderAccountGroupInfo.code")
-    p44_account_code = Column(String(100), comment="P44 CapacityProviderAccountInfos.code")
-
-    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    config_id = Column(Integer, ForeignKey("supply_chain_configs.id", ondelete="CASCADE"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    lanes = relationship("CarrierLane", back_populates="carrier", cascade="all, delete-orphan")
-    equipment = relationship("Equipment", back_populates="carrier", cascade="all, delete-orphan")
-    rates = relationship("FreightRate", back_populates="carrier", cascade="all, delete-orphan")
-    scorecards = relationship("CarrierScorecard", back_populates="carrier", cascade="all, delete-orphan")
-    tenders = relationship("FreightTender", back_populates="carrier")
-
-    __table_args__ = (
-        UniqueConstraint('tenant_id', 'code', name='uq_carrier_tenant_code'),
-        Index('idx_carrier_tenant_active', 'tenant_id', 'is_active'),
-        Index('idx_carrier_scac', 'scac'),
-    )
+# §3.47 Phase 3: TMS-side `class Carrier(Base)` deleted. The
+# canonical Carrier identity now lives in Core
+# (`azirella_data_model.settlement.entities.Carrier`); it's
+# re-exported at the top of this file so existing
+# `from app.models.tms_entities import Carrier` imports keep working.
+# The TMS-specific dispatch fields (code, modes, equipment_types,
+# tracking_api_*, p44_*, etc.) live on `CarrierTMSProfile` below,
+# joined to `Carrier` via `carrier_id`.
+#
+# Relationships from CarrierLane / Equipment / FreightRate /
+# CarrierScorecard / FreightTender to Carrier keep their
+# `relationship("Carrier")` declarations but DROP `back_populates`
+# (Core's Carrier doesn't expose `lanes` / `equipment` / etc.
+# collections — those are TMS dispatch concerns and don't belong
+# on a settlement-side identity row).
 
 
 # ============================================================================
@@ -535,7 +486,7 @@ class CarrierLane(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    carrier = relationship("Carrier", back_populates="lanes")
+    carrier = relationship("Carrier")
     lane = relationship("TransportationLane")
 
     __table_args__ = (
@@ -588,7 +539,7 @@ class Equipment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    carrier = relationship("Carrier", back_populates="equipment")
+    carrier = relationship("Carrier")
     current_site = relationship("Site", foreign_keys=[current_site_id])
 
     __table_args__ = (
@@ -646,7 +597,7 @@ class CarrierScorecard(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    carrier = relationship("Carrier", back_populates="scorecards")
+    carrier = relationship("Carrier")
 
     __table_args__ = (
         Index('idx_scorecard_carrier_period', 'carrier_id', 'period_start'),
@@ -997,7 +948,7 @@ class FreightRate(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    carrier = relationship("Carrier", back_populates="rates")
+    carrier = relationship("Carrier")
     lane = relationship("TransportationLane")
 
     __table_args__ = (
@@ -1044,7 +995,7 @@ class FreightTender(Base):
     # Relationships
     shipment = relationship("app.models.tms_entities.TMSShipment", back_populates="tenders")
     load = relationship("Load")
-    carrier = relationship("Carrier", back_populates="tenders")
+    carrier = relationship("Carrier")
     rate = relationship("FreightRate")
 
     __table_args__ = (

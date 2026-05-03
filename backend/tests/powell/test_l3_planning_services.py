@@ -100,16 +100,41 @@ def db() -> Session:
             id = Column(Integer, primary_key=True)
 
     engine = create_engine("sqlite:///:memory:")
+    # §3.47: Core's settlement Carrier / Contract / RateCard /
+    # CarrierCapacityCommitment register on the same Base.metadata as
+    # TMS ORMs after the carrier-identity cutover. They're imported
+    # by the test body, so they're already in metadata by the time
+    # this fixture runs.
+    # TMS-side LaneProfile (used by _seed_lane_profile helper) needs
+    # to be loaded so its table is in metadata at create_all time.
+    # The services lazy-import it; here we eagerly preload.
+    try:
+        import app.models.transportation_config  # noqa: F401
+    except ImportError:
+        pass
+
+    settlement_tables = []
+    for tbl_name in (
+        "carrier", "contract", "rate_card", "carrier_capacity_commitment",
+    ):
+        if tbl_name in Base.metadata.tables:
+            settlement_tables.append(Base.metadata.tables[tbl_name])
+    # LaneProfile when loaded; falls back gracefully when not.
+    if "lane_profile" in Base.metadata.tables:
+        settlement_tables.append(Base.metadata.tables["lane_profile"])
     tables = [
         Base.metadata.tables[t] for t in [
             "supply_chain_configs", "scenarios", "transportation_lane",
-            "site", "tenants", "users", "carrier", "freight_rate", "load",
+            "site", "tenants", "users", "freight_rate", "load",
         ]
-    ] + [
+    ] + settlement_tables + [
         LaneVolumePlan.__table__,
         TransportationPlan.__table__,
         TransportationPlanItem.__table__,
     ]
+    # CarrierTMSProfile (added in §3.47 Phase 1) — included when present.
+    if "carrier_tms_profile" in Base.metadata.tables:
+        tables.append(Base.metadata.tables["carrier_tms_profile"])
     Base.metadata.create_all(bind=engine, tables=tables)
     Sess = sessionmaker(bind=engine)
     s = Sess()

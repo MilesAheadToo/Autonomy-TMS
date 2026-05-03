@@ -301,7 +301,7 @@ class FreightProcurementTRM:
 
             candidates.append({
                 "carrier_id": carrier.id,
-                "carrier_name": carrier.name,
+                "carrier_name": carrier.display_name,
                 "carrier_code": profile.code if profile else None,
                 "rate": float(rate) if rate else 2500.0,
                 "priority": cl.priority,

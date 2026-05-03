@@ -389,7 +389,7 @@ async def get_carrier_detail(
         detail = CarrierDetail(
             id=carrier.id,
             code=profile.code if profile else None,
-            name=carrier.name,
+            name=carrier.display_name,
             carrier_type=_safe_str(carrier.carrier_type),
             scac=carrier.scac,
             mc_number=carrier.mc_number,
@@ -398,7 +398,7 @@ async def get_carrier_detail(
             modes=profile.modes if profile else None,
             equipment_types=profile.equipment_types if profile else None,
             service_regions=profile.service_regions if profile else None,
-            is_active=carrier.is_active,
+            is_active=(carrier.status == "ACTIVE"),
             is_hazmat_certified=(
                 profile.is_hazmat_certified if profile else False
             ),
@@ -1397,17 +1397,33 @@ async def create_carrier(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Create a new carrier for the current tenant."""
+    """Create a new carrier for the current tenant.
+
+    §3.47 Phase 3: Carrier holds canonical identity (Core schema);
+    dispatch fields land on a sibling CarrierTMSProfile row.
+    """
     cfg = await _resolve_config_id(body.config_id, current_user, db)
     c = Carrier(
         tenant_id=current_user.tenant_id,
-        config_id=cfg,
-        code=body.code,
-        name=body.name,
-        carrier_type=body.carrier_type,
         scac=body.scac,
+        display_name=body.name,
+        carrier_type=body.carrier_type,
+        status=(
+            "ACTIVE" if (body.is_active is None or body.is_active) else "INACTIVE"
+        ),
         mc_number=body.mc_number,
         dot_number=body.dot_number,
+        currency="USD",
+        payment_terms_days=30,
+    )
+    db.add(c)
+    await db.flush()  # populate c.id
+
+    profile = CarrierTMSProfile(
+        carrier_id=c.id,
+        tenant_id=current_user.tenant_id,
+        config_id=cfg,
+        code=body.code,
         modes=body.modes or [],
         equipment_types=body.equipment_types or [],
         service_regions=body.service_regions or [],
@@ -1419,14 +1435,13 @@ async def create_carrier(
         primary_contact_phone=body.primary_contact_phone,
         dispatch_email=body.dispatch_email,
         dispatch_phone=body.dispatch_phone,
-        is_active=body.is_active if body.is_active is not None else True,
         onboarding_status=body.onboarding_status or "ACTIVE",
         source="manual",
     )
-    db.add(c)
+    db.add(profile)
     await db.commit()
     await db.refresh(c)
-    return {"id": c.id, "code": c.code, "name": c.name}
+    return {"id": c.id, "code": body.code, "name": c.display_name}
 
 
 @carriers_router.patch("/{carrier_id}", response_model=Dict[str, Any])
@@ -1436,7 +1451,11 @@ async def update_carrier(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Update an existing carrier."""
+    """Update an existing carrier.
+
+    §3.47 Phase 3: split writes between Core's Carrier (canonical
+    identity fields) and TMS's CarrierTMSProfile (dispatch fields).
+    """
     stmt = select(Carrier).where(
         Carrier.id == carrier_id,
         Carrier.tenant_id == current_user.tenant_id,
@@ -1444,17 +1463,42 @@ async def update_carrier(
     c = (await db.execute(stmt)).scalar_one_or_none()
     if not c:
         raise HTTPException(404, f"Carrier {carrier_id} not found")
-    for f in ["code", "name", "carrier_type", "scac", "mc_number", "dot_number",
-              "modes", "equipment_types", "service_regions", "is_hazmat_certified",
-              "is_bonded", "insurance_limit", "primary_contact_name",
-              "primary_contact_email", "primary_contact_phone", "dispatch_email",
-              "dispatch_phone", "is_active", "onboarding_status"]:
+
+    # Core canonical fields on Carrier itself.
+    if body.name is not None:
+        c.display_name = body.name
+    for f in ("carrier_type", "scac", "mc_number", "dot_number"):
         v = getattr(body, f)
         if v is not None:
             setattr(c, f, v)
+    if body.is_active is not None:
+        c.status = "ACTIVE" if body.is_active else "INACTIVE"
+
+    # Dispatch fields on CarrierTMSProfile (upsert).
+    profile_stmt = select(CarrierTMSProfile).where(
+        CarrierTMSProfile.carrier_id == carrier_id,
+        CarrierTMSProfile.tenant_id == current_user.tenant_id,
+    )
+    profile = (await db.execute(profile_stmt)).scalar_one_or_none()
+    if profile is None:
+        profile = CarrierTMSProfile(
+            carrier_id=carrier_id, tenant_id=current_user.tenant_id,
+        )
+        db.add(profile)
+    for f in (
+        "code", "modes", "equipment_types", "service_regions",
+        "is_hazmat_certified", "is_bonded", "insurance_limit",
+        "primary_contact_name", "primary_contact_email",
+        "primary_contact_phone", "dispatch_email", "dispatch_phone",
+        "onboarding_status",
+    ):
+        v = getattr(body, f, None)
+        if v is not None:
+            setattr(profile, f, v)
+
     await db.commit()
     await db.refresh(c)
-    return {"id": c.id, "code": c.code, "name": c.name, "updated": True}
+    return {"id": c.id, "code": profile.code, "name": c.display_name, "updated": True}
 
 
 @carriers_router.delete("/{carrier_id}", response_model=Dict[str, Any])
@@ -1463,7 +1507,12 @@ async def delete_carrier(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Soft-delete a carrier (set is_active=False)."""
+    """Soft-delete a carrier (Core status=INACTIVE; profile
+    onboarding_status=SUSPENDED).
+
+    §3.47 Phase 3: ``status`` lives on Core's Carrier;
+    ``onboarding_status`` lives on TMS's CarrierTMSProfile.
+    """
     stmt = select(Carrier).where(
         Carrier.id == carrier_id,
         Carrier.tenant_id == current_user.tenant_id,
@@ -1471,8 +1520,16 @@ async def delete_carrier(
     c = (await db.execute(stmt)).scalar_one_or_none()
     if not c:
         raise HTTPException(404, f"Carrier {carrier_id} not found")
-    c.is_active = False
-    c.onboarding_status = "SUSPENDED"
+    c.status = "INACTIVE"
+
+    profile_stmt = select(CarrierTMSProfile).where(
+        CarrierTMSProfile.carrier_id == carrier_id,
+        CarrierTMSProfile.tenant_id == current_user.tenant_id,
+    )
+    profile = (await db.execute(profile_stmt)).scalar_one_or_none()
+    if profile is not None:
+        profile.onboarding_status = "SUSPENDED"
+
     await db.commit()
     return {"id": carrier_id, "deleted": True}
 

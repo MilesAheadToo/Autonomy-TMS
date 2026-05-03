@@ -394,59 +394,63 @@ class FoodDistTMSOverlay:
             self._lanes.append(lane)
         self.session.flush()
 
-    def _seed_carriers(self) -> None:
-        existing = {
-            c.code: c for c in self.session.execute(
-                select(Carrier).where(Carrier.tenant_id == self.tms_tenant_id)
-            ).scalars().all()
-        }
+    def _dispatch_code_map(self) -> Dict[int, str]:
+        """§3.47 Phase 3 helper — ``{carrier_id: dispatch_code}`` map.
 
+        Dispatch ``code`` lives on ``CarrierTMSProfile`` after the
+        cutover; old ``carrier.code`` reads are replaced with this
+        lookup. Reads only the current tenant's profiles.
+        """
+        return dict(
+            self.session.execute(
+                select(CarrierTMSProfile.carrier_id, CarrierTMSProfile.code)
+                .where(CarrierTMSProfile.tenant_id == self.tms_tenant_id)
+            ).all()
+        )
+
+    def _seed_carriers(self) -> None:
+        # §3.47 Phase 3: dispatch `code` is on CarrierTMSProfile;
+        # join to find which carriers are already seeded by code.
+        existing_rows = self.session.execute(
+            select(Carrier, CarrierTMSProfile.code)
+            .outerjoin(
+                CarrierTMSProfile,
+                CarrierTMSProfile.carrier_id == Carrier.id,
+            )
+            .where(Carrier.tenant_id == self.tms_tenant_id)
+        ).all()
+        existing = {code: carrier for carrier, code in existing_rows if code}
+
+        # §3.47 Phase 3: Carrier construction now uses Core's
+        # canonical-identity fields only (display_name / status /
+        # currency / payment_terms_days / metadata). Dispatch fields
+        # land on CarrierTMSProfile below. Track (carrier, spec) pairs
+        # so we can wire the profile without hunting for spec by code.
+        new_pairs = []  # list of (carrier, spec) for profile seeding
         for spec in TOP_FOODSERVICE_CARRIERS:
             if spec.code in existing:
                 self._carriers.append(existing[spec.code])
                 continue
             carrier = Carrier(
-                code=spec.code,
-                name=spec.name,
-                scac=spec.scac,
-                carrier_type=CarrierType(spec.carrier_type),
-                modes=list(spec.modes),
-                equipment_types=list(spec.equipment_types),
-                service_regions=list(spec.service_regions),
-                is_hazmat_certified=spec.is_hazmat_certified,
-                insurance_limit=spec.insurance_limit,
-                is_active=True,
-                onboarding_status="ACTIVE",
-                onboarding_date=date(2022, 1, 1),
-                source="food_dist_tms_seed",
                 tenant_id=self.tms_tenant_id,
-                config_id=self.sc_config_id,
+                scac=spec.scac,
+                display_name=spec.name,
+                carrier_type=spec.carrier_type,
+                status="ACTIVE",
+                currency="USD",
+                payment_terms_days=30,
             )
             self.session.add(carrier)
             self._carriers.append(carrier)
+            new_pairs.append((carrier, spec))
         self.session.flush()
 
-        # §3.47 Phase 2 — write the dispatch fields to CarrierTMSProfile
-        # too. The seeder's internal `carrier.code` reads still work
-        # against the in-memory Carrier object (column not dropped
-        # until Phase 3); but external consumers query
-        # CarrierTMSProfile, so the substrate has to be populated at
-        # seed time.
-        existing_profile_carrier_ids = set(
-            self.session.execute(
-                select(CarrierTMSProfile.carrier_id)
-                .where(CarrierTMSProfile.tenant_id == self.tms_tenant_id)
-            ).scalars().all()
-        )
-        for carrier in self._carriers:
-            if carrier.id in existing_profile_carrier_ids:
-                continue
-            spec = next(
-                (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier.code),
-                None,
-            )
-            if not spec:
-                continue
+        # Seed CarrierTMSProfile rows for newly-created carriers. We
+        # don't need to check existing-profiles here because new_pairs
+        # only contains carriers we just created (existing carriers
+        # already had profiles from Phase 1's Alembic backfill or a
+        # prior run of this seeder).
+        for carrier, spec in new_pairs:
             self.session.add(CarrierTMSProfile(
                 carrier_id=carrier.id,
                 tenant_id=self.tms_tenant_id,
@@ -501,9 +505,13 @@ class FoodDistTMSOverlay:
             ).all()
         )
 
+        # §3.47 Phase 3: dispatch code lives on CarrierTMSProfile.
+        code_by_carrier_id = self._dispatch_code_map()
+
         for carrier in self._carriers:
+            carrier_code = code_by_carrier_id.get(carrier.id)
             spec = next(
-                (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier.code), None
+                (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier_code), None
             )
             if not spec:
                 continue
@@ -547,7 +555,7 @@ class FoodDistTMSOverlay:
                     eq_type, (53.0, 44000.0, 3489.0, False))
 
                 equipment = Equipment(
-                    equipment_id=f"{carrier.code}-{eq_type[:3]}-{i:04d}",
+                    equipment_id=f"{carrier_code}-{eq_type[:3]}-{i:04d}",
                     equipment_type=EquipmentType(eq_type),
                     carrier_id=carrier.id,
                     length_ft=length,
@@ -586,9 +594,15 @@ class FoodDistTMSOverlay:
         dry_codes = {code for code, eqs in carrier_eq_map.items()
                      if "DRY_VAN" in eqs or "CONTAINER_40" in eqs or "CONTAINER_40HC" in eqs
                      or "FLATBED" in eqs or "CONTAINER_45" in eqs}
+        # §3.47 Phase 3: dispatch code via CarrierTMSProfile.
+        code_by_carrier_id = self._dispatch_code_map()
+
         # If no carriers match (e.g., all ocean/container), use all carriers as dry-capable
         if not dry_codes:
-            dry_codes = {c.code for c in self._carriers}
+            dry_codes = {
+                code_by_carrier_id.get(c.id) for c in self._carriers
+                if code_by_carrier_id.get(c.id)
+            }
 
         for lane in self._lanes:
             from_site = self._sites_by_id.get(lane.from_site_id)
@@ -596,7 +610,10 @@ class FoodDistTMSOverlay:
 
             for equipment in ("REEFER", "DRY_VAN"):
                 candidates = reefer_codes if equipment == "REEFER" else dry_codes
-                eligible = [c for c in self._carriers if c.code in candidates]
+                eligible = [
+                    c for c in self._carriers
+                    if code_by_carrier_id.get(c.id) in candidates
+                ]
 
                 # Shuffle to avoid always picking the same top-N carriers
                 self.rng.shuffle(eligible)
@@ -604,8 +621,9 @@ class FoodDistTMSOverlay:
                 # 3-5 carriers per lane × equipment
                 picks = eligible[: self.rng.randint(3, 5)]
                 for pos, carrier in enumerate(picks):
+                    carrier_code = code_by_carrier_id.get(carrier.id)
                     spec = next(
-                        (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier.code),
+                        (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier_code),
                         None,
                     )
                     cl = CarrierLane(
@@ -990,14 +1008,18 @@ class FoodDistTMSOverlay:
         tenders_sent = 0
         assigned: Optional[Carrier] = None
 
+        # §3.47 Phase 3: dispatch code via CarrierTMSProfile.
+        code_by_carrier_id = self._dispatch_code_map()
+
         for attempt, cl in enumerate(sorted(cls, key=lambda x: x.priority), start=1):
             if attempt > self.cfg.max_tender_attempts:
                 break
             carrier = next((c for c in self._carriers if c.id == cl.carrier_id), None)
             if carrier is None:
                 continue
+            carrier_code = code_by_carrier_id.get(carrier.id)
             spec = next(
-                (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier.code), None
+                (s for s in TOP_FOODSERVICE_CARRIERS if s.code == carrier_code), None
             )
             carrier_reject_bias = (1.0 - spec.typical_acceptance_rate) if spec else 0.15
 
