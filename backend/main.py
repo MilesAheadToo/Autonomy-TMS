@@ -6812,6 +6812,10 @@ api.include_router(routes_router, prefix="/shipments", tags=["shipment-routes", 
 from app.api.endpoints.tms_api import plans_router
 api.include_router(plans_router, prefix="/transportation-plans", tags=["transportation-plans", "tms"])
 
+# §3.46 Phase 4 — L3 transport cascade manual-trigger HTTP API
+from app.api.endpoints.l3_cascade import router as l3_cascade_router
+api.include_router(l3_cascade_router, prefix="/l3-cascade", tags=["l3-cascade", "tms"])
+
 # TMS-native scenario runner
 from app.api.endpoints.tms_scenarios import router as tms_scenarios_router
 api.include_router(tms_scenarios_router, prefix="/tms-scenarios", tags=["tms-scenarios"])
