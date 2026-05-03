@@ -250,6 +250,8 @@ class LaneFlowSimulator:
         dock_queue_model: Any = None,
         scenario_appointment_type: str = "live_unload",
         equipment_flow_model: Any = None,
+        spot_rate_model: Any = None,
+        spot_rate_contract_per_load: float | None = None,
     ):
         self._generator = generator
         self.tenant_id = int(tenant_id)
@@ -315,6 +317,26 @@ class LaneFlowSimulator:
         # Full delegation lands when EquipmentReposition RL training
         # requires it.
         self._equipment_flow_model = equipment_flow_model
+        # PR-3.E — opt-in SpotRateModel. Drives a per-step
+        # spot-rate-and-tightness recursion. ``None`` (default) keeps
+        # the simulator's existing constant ``scenario_market_tightness``
+        # behaviour for the carrier-acceptance and dispatch paths.
+        # When attached, the simulator advances the model once per
+        # step() and stamps the realised spot_rate + tightness +
+        # season_factor + epsilon on each tender_accepted outcome
+        # event for downstream BrokerRouting / CapacityBuffer /
+        # IntermodalTransfer reward attribution.
+        # ``spot_rate_contract_per_load`` anchors the model's
+        # ``contract_rate``. When None, falls back to
+        # ``LanePhysicsParams.cost_target_per_load`` — same currency
+        # the rest of the simulator uses.
+        self._spot_rate_model = spot_rate_model
+        self._spot_rate_contract_per_load = (
+            spot_rate_contract_per_load
+            if spot_rate_contract_per_load is not None
+            else float(lane_params.cost_target_per_load)
+        )
+        self._latest_spot_outcome: Any = None
 
         if self.horizon_buckets < 1:
             raise ValueError(
@@ -407,6 +429,13 @@ class LaneFlowSimulator:
                             else 0
                         ),
                     )
+        if self._spot_rate_model is not None:
+            self._spot_rate_model.reset(
+                scenario_seed=scenario_seed + 5,
+                twin_mode=self.mode,
+                initial_spot_rate=self._spot_rate_contract_per_load,
+            )
+            self._latest_spot_outcome = None
         self._reset_called = True
 
         # Initial observation has zero arrivals "this period" because
@@ -444,6 +473,21 @@ class LaneFlowSimulator:
         carrier = self._resolve_carrier(action.carrier_id)
         equipment = self._resolve_equipment(action.equipment_kind)
         prev_obs = self._observe_current(action)
+
+        # PR-3.E — advance the spot-rate model once per step before any
+        # tender decisions are made (acceptance and routing both want
+        # to read the current period's spot conditions). The result is
+        # cached on ``_latest_spot_outcome`` for stamping onto
+        # tender_accepted events later in this method.
+        if self._spot_rate_model is not None:
+            from app.services.digital_twin.physics import SpotRateContext
+            doy = self._state.bucket_start.timetuple().tm_yday
+            spot_ctx = SpotRateContext(
+                contract_rate=self._spot_rate_contract_per_load,
+                day_of_year=doy,
+                shock_tightness=0.0,  # scenario shocks plumb through here later
+            )
+            self._latest_spot_outcome = self._spot_rate_model.step(spot_ctx)
 
         # 1. Sample arrivals (line items) at this bucket from the envelope.
         arrivals = self._sample_arrivals(self._state.bucket)
@@ -565,6 +609,17 @@ class LaneFlowSimulator:
                 payload["transit_p90_buckets"] = t_o.p90_buckets
                 payload["transit_season_factor"] = t_o.season_factor
                 payload["transit_weather_factor"] = t_o.weather_factor
+            # PR-3.E — spot-rate market metadata for BrokerRouting +
+            # CapacityBuffer + IntermodalTransfer reward attribution.
+            if self._latest_spot_outcome is not None:
+                s_o = self._latest_spot_outcome
+                payload["spot_rate"] = s_o.spot_rate
+                payload["spot_tightness"] = s_o.tightness
+                payload["spot_season_factor"] = s_o.season_factor
+                payload["spot_epsilon"] = s_o.epsilon
+                payload["spot_premium_vs_contract"] = (
+                    s_o.spot_rate - self._spot_rate_contract_per_load
+                )
             self._emit_outcome(
                 decision_id=self._make_decision_id(load_idx),
                 decision_type="load_dispatch",

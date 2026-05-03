@@ -44,6 +44,12 @@ from .lane_transit import (
     TransitOutcome,
 )
 from .protocol import PhysicsModel
+from .spot_rate import (
+    SpotRateContext,
+    SpotRateModel,
+    SpotRateOutcome,
+    SpotRateParams,
+)
 from .tracking_event import (
     CarrierTrackingTier,
     TrackingContext,
@@ -75,6 +81,10 @@ __all__ = [
     "LaneTransitModel",
     "LaneTransitParams",
     "PhysicsModel",
+    "SpotRateContext",
+    "SpotRateModel",
+    "SpotRateOutcome",
+    "SpotRateParams",
     "TenderContext",
     "TenderOutcome",
     "TrackingContext",
