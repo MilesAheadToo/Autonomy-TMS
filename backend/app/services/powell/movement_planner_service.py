@@ -260,7 +260,7 @@ class MovementPlannerService:
         period_days: int = 7,
         scenario_id: Optional[int] = None,
         forecast_plan_version: str = DEFAULT_PLAN_VERSION,
-        cascade_run_id: Optional[str] = None,
+        cascade_run_id: Optional[int] = None,
         carrier_assignment_enabled: bool = True,
         model: Optional[GraphSAGEMovementPlannerModel] = None,
         model_confidence_threshold: float = 0.5,

@@ -19,19 +19,20 @@ recoverable evidence even when the Balancer fails — operators can
 inspect what the heuristic produced, fix the capacity / commitment
 data, and re-run the Balancer alone.
 
-**Shared cascade_run_id.** Both writes are tagged with the same
-``cascade_run_id`` (shape: ``l3_<tenant>_<utc-iso>_<uuid8>``) so
-consumers can correlate the unconstrained → constrained pair.
-``TransportationPlan.cascade_run_id`` is a free-text column today;
-§3.46 Phase 3 promotes it to an FK on a Core ``CascadeRun``
-substrate.
+**Shared cascade_run.** Both stages' TransportationPlan rows stamp
+``cascade_run_id`` with the same integer FK pointing at a
+``cascade_run`` row in Core's substrate (§3.46 Phase 3 / Phase
+3-followon). The runner generates a human-readable
+``cascade_run_label`` (shape: ``l3_<tenant>_<utc-iso>_<uuid8>``)
+that lives on ``cascade_run.cascade_run_id`` for log-grep + audit;
+plans link via the integer FK on ``cascade_run.id`` for fast joins.
 
 **Idempotency.** ``run()`` checks for an existing
-``TransportationPlan`` with ``plan_start_date == period_start`` AND
-``cascade_run_id LIKE 'l3_%'`` for the tenant; skips with
-``status="SKIPPED"`` unless ``force=True``. This makes the cron in
-§3.46 Phase 2 safe to fire-and-forget — re-running on the same period
-is a no-op.
+``TransportationPlan`` with ``plan_start_date == period_start`` and
+a parent ``cascade_run`` with ``plane_type == L3_TRANSPORT`` for the
+tenant; skips with ``status="SKIPPED"`` unless ``force=True``. This
+makes the cron in §3.46 Phase 2 safe to fire-and-forget — re-running
+on the same period is a no-op.
 
 **Plane-module placement.** TMS-side decision orchestration. Per the
 plane-module invariant (CLAUDE.md): the cascade-runner pattern is
@@ -102,6 +103,12 @@ class CascadeRunResult:
     """Per-call summary."""
 
     cascade_run_id: str
+    """Human-readable cascade-run label (shape:
+    ``l3_<tenant>_<utc-iso>_<uuid8>``). Stored on
+    ``CascadeRun.cascade_run_id`` and useful for log-grep / debug.
+    Plans produced by the cascade FK to ``CascadeRun.id`` (the int
+    PK), exposed below as ``cascade_run_pk``."""
+
     tenant_id: int
     config_id: int
     period_start: date
@@ -117,6 +124,14 @@ class CascadeRunResult:
 
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+    cascade_run_pk: Optional[int] = None
+    """Integer FK on ``cascade_run.id`` — the parent substrate row
+    that the L3 plans stamp via ``TransportationPlan.cascade_run_id``
+    (an Integer FK after §3.46 Phase 3-followon). ``None`` when the
+    substrate write failed (e.g., older Core pin / partial deployment)
+    — the cascade still ran to completion via the per-stage commits;
+    plans just lack the substrate join key."""
 
 
 class L3CascadeRunner:
@@ -178,7 +193,7 @@ class L3CascadeRunner:
         deployment), the writes silently no-op and the runner
         behaves exactly as before.
         """
-        cascade_run_id = self._new_run_id(tenant_id)
+        cascade_run_label = self._new_run_id(tenant_id)
         started_at = datetime.utcnow()
 
         # Idempotency check.
@@ -194,8 +209,8 @@ class L3CascadeRunner:
                 # SKIPPED runs still get a CascadeRun row so the
                 # "did the cron consider this period?" question has a
                 # definitive answer in the substrate.
-                self._record_cascade_run(
-                    cascade_run_id=cascade_run_id,
+                cascade_run_pk = self._record_cascade_run(
+                    cascade_run_label=cascade_run_label,
                     tenant_id=tenant_id,
                     period_start=period_start,
                     started_at=started_at,
@@ -204,21 +219,22 @@ class L3CascadeRunner:
                     stages=[],
                 )
                 return CascadeRunResult(
-                    cascade_run_id=cascade_run_id,
+                    cascade_run_id=cascade_run_label,
                     tenant_id=tenant_id, config_id=config_id,
                     period_start=period_start,
                     status="SKIPPED",
                     stages=[],
                     started_at=started_at,
                     completed_at=datetime.utcnow(),
+                    cascade_run_pk=cascade_run_pk,
                 )
 
         # Open the cascade-run row at the start of execution
         # (status=RUNNING). Stage updates and the final status
         # land via _record_cascade_run on the same row by
-        # cascade_run_id.
-        self._record_cascade_run(
-            cascade_run_id=cascade_run_id,
+        # cascade_run_label.
+        cascade_run_pk = self._record_cascade_run(
+            cascade_run_label=cascade_run_label,
             tenant_id=tenant_id,
             period_start=period_start,
             started_at=started_at,
@@ -229,18 +245,24 @@ class L3CascadeRunner:
         stages: List[StageResult] = []
 
         # Stage 1 — Movement Planner (unconstrained_reference).
+        # ``cascade_run_id=cascade_run_pk`` stamps the int FK on
+        # ``TransportationPlan.cascade_run_id`` (Integer FK after
+        # §3.46 Phase 3-followon). When pk is None (substrate
+        # write failed), the column stays NULL — the cascade still
+        # runs to completion; consumers just lose the substrate
+        # join key.
         movement = self._run_movement(
             tenant_id=tenant_id, config_id=config_id,
             period_start=period_start, period_days=period_days,
             scenario_id=scenario_id,
             forecast_plan_version=forecast_plan_version,
-            cascade_run_id=cascade_run_id,
+            cascade_run_id=cascade_run_pk,
         )
         stages.append(movement)
         if movement.status != "OK" or movement.plan_id is None:
             completed_at = datetime.utcnow()
             self._record_cascade_run(
-                cascade_run_id=cascade_run_id,
+                cascade_run_label=cascade_run_label,
                 tenant_id=tenant_id,
                 period_start=period_start,
                 started_at=started_at,
@@ -249,19 +271,20 @@ class L3CascadeRunner:
                 stages=stages,
             )
             return CascadeRunResult(
-                cascade_run_id=cascade_run_id,
+                cascade_run_id=cascade_run_label,
                 tenant_id=tenant_id, config_id=config_id,
                 period_start=period_start,
                 status="FAILED",
                 stages=stages,
                 started_at=started_at,
                 completed_at=completed_at,
+                cascade_run_pk=cascade_run_pk,
             )
 
         # Stage 2 — Integrated Balancer (constrained_live).
         balancer = self._run_balancer(
             unconstrained_plan_id=movement.plan_id,
-            cascade_run_id=cascade_run_id,
+            cascade_run_id=cascade_run_pk,
             resolve_capacity_from_db=resolve_capacity_from_db,
         )
         stages.append(balancer)
@@ -269,7 +292,7 @@ class L3CascadeRunner:
         completed_at = datetime.utcnow()
         final_status = "OK" if balancer.status == "OK" else "FAILED"
         self._record_cascade_run(
-            cascade_run_id=cascade_run_id,
+            cascade_run_label=cascade_run_label,
             tenant_id=tenant_id,
             period_start=period_start,
             started_at=started_at,
@@ -279,13 +302,14 @@ class L3CascadeRunner:
         )
 
         return CascadeRunResult(
-            cascade_run_id=cascade_run_id,
+            cascade_run_id=cascade_run_label,
             tenant_id=tenant_id, config_id=config_id,
             period_start=period_start,
             status=final_status,
             stages=stages,
             started_at=started_at,
             completed_at=completed_at,
+            cascade_run_pk=cascade_run_pk,
         )
 
     # ------------------------------------------------------------------
@@ -376,7 +400,7 @@ class L3CascadeRunner:
         period_start: date, period_days: int,
         scenario_id: Optional[int],
         forecast_plan_version: str,
-        cascade_run_id: str,
+        cascade_run_id: Optional[int],
     ) -> StageResult:
         try:
             svc = MovementPlannerService(self.db)
@@ -413,7 +437,7 @@ class L3CascadeRunner:
     def _run_balancer(
         self, *,
         unconstrained_plan_id: int,
-        cascade_run_id: str,
+        cascade_run_id: Optional[int],
         resolve_capacity_from_db: bool,
     ) -> StageResult:
         try:
@@ -465,17 +489,41 @@ class L3CascadeRunner:
         self, tenant_id: int, period_start: date,
     ) -> Optional[TransportationPlan]:
         """Return any existing L3-cascade plan for the (tenant, period)
-        that idempotency should skip on. Matches by ``plan_start_date``
-        + the ``l3_`` prefix on ``cascade_run_id`` so plans produced
-        by a different cascade (or by manual operator action with no
-        cascade_run_id) don't trigger the skip.
+        that idempotency should skip on.
+
+        §3.46 Phase 3-followon: ``TransportationPlan.cascade_run_id``
+        is now an Integer FK on ``cascade_run.id``. Matching the
+        ``L3_TRANSPORT`` plane_type requires a JOIN through the
+        substrate; the old ``LIKE 'l3_%'`` String filter is gone.
+
+        Plans without a cascade_run_id (manual operator action / pre-
+        substrate vintage) don't trigger the skip — same semantics
+        as the pre-followon code, just expressed via JOIN now.
         """
+        try:
+            from azirella_data_model.powell.cascade_run import (
+                CascadePlaneType,
+                CascadeRun,
+            )
+        except ImportError:
+            # Substrate not deployed yet — nothing to JOIN against;
+            # idempotency check trivially returns None (no matching
+            # L3 plan in the substrate sense). Pre-substrate plans
+            # would have NULL cascade_run_id; we can't distinguish
+            # them from manual operator plans, so the safe answer is
+            # "no match → run the cascade".
+            return None
+
         return (
             self.db.query(TransportationPlan)
+            .join(
+                CascadeRun,
+                CascadeRun.id == TransportationPlan.cascade_run_id,
+            )
             .filter(
                 TransportationPlan.tenant_id == tenant_id,
                 TransportationPlan.plan_start_date == period_start,
-                TransportationPlan.cascade_run_id.like(f"{_RUN_ID_PREFIX}_%"),
+                CascadeRun.plane_type == CascadePlaneType.L3_TRANSPORT,
             )
             .first()
         )
@@ -486,40 +534,45 @@ class L3CascadeRunner:
 
     def _record_cascade_run(
         self, *,
-        cascade_run_id: str,
+        cascade_run_label: str,
         tenant_id: int,
         period_start: date,
         started_at: datetime,
         completed_at: Optional[datetime] = None,
         status: str,
         stages: List[StageResult],
-    ) -> None:
+    ) -> Optional[int]:
         """Upsert a :class:`CascadeRun` row in Core's substrate.
 
         Inserts on first call (status=RUNNING at run start) and
         updates on subsequent calls (status / completed_at / per-stage
         counters / run_metadata at terminal states). Keyed by the
-        unique ``cascade_run_id`` string.
+        unique ``cascade_run_id`` string (the human-readable
+        identifier — exposed here as ``cascade_run_label`` to make
+        the role distinct from the integer FK
+        ``TransportationPlan.cascade_run_id`` after §3.46 Phase 3-followon).
 
-        Defensive: when Core's ``CascadeRun`` ORM isn't importable
-        (older Core pin where the §3.46 Phase 3 substrate hasn't
-        landed yet, or a partial-deployment fallback), this method
-        silently no-ops and the runner behaves exactly as before.
-        Same pattern as ``_lane_distance_miles`` in
-        ``MovementPlannerService`` — graceful when the substrate
-        isn't there yet.
+        Returns the row's integer primary key (``CascadeRun.id``),
+        which downstream stages use as the FK on
+        ``TransportationPlan.cascade_run_id``. Returns ``None`` when
+        Core's ``CascadeRun`` substrate isn't importable (older Core
+        pin / partial deployment); the runner falls back to plans-
+        without-substrate-link in that case.
 
-        Commits its own write so the substrate row survives
-        independently of the per-stage transaction boundaries.
+        Defensive: substrate write failures are logged but never
+        surface to the caller — the cascade's primary outputs (the
+        two TransportationPlan rows) are already committed by the
+        stage runners. Substrate emission is observability, not
+        load-bearing.
         """
         try:
-            from azirella_data_model.powell import (
+            from azirella_data_model.powell.cascade_run import (
                 CascadePlaneType,
                 CascadeRun,
                 CascadeRunStatus,
             )
         except ImportError:
-            return
+            return None
 
         n_total = len(stages) if stages else 2  # L3 has 2 stages
         n_ok = sum(1 for s in stages if s.status == "OK")
@@ -569,12 +622,12 @@ class L3CascadeRunner:
         try:
             existing = (
                 self.db.query(CascadeRun)
-                .filter(CascadeRun.cascade_run_id == cascade_run_id)
+                .filter(CascadeRun.cascade_run_id == cascade_run_label)
                 .first()
             )
             if existing is None:
-                self.db.add(CascadeRun(
-                    cascade_run_id=cascade_run_id,
+                row = CascadeRun(
+                    cascade_run_id=cascade_run_label,
                     tenant_id=tenant_id,
                     plane_type=CascadePlaneType.L3_TRANSPORT,
                     period_start=datetime.combine(
@@ -588,7 +641,10 @@ class L3CascadeRunner:
                     n_stages_failed=n_failed,
                     error_summary=error_summary,
                     run_metadata=run_metadata if stages else None,
-                ))
+                )
+                self.db.add(row)
+                self.db.flush()  # populate row.id without committing
+                pk = row.id
             else:
                 existing.status = CascadeRunStatus(status)
                 existing.completed_at = completed_at
@@ -598,7 +654,9 @@ class L3CascadeRunner:
                 existing.error_summary = error_summary
                 if stages:
                     existing.run_metadata = run_metadata
+                pk = existing.id
             self.db.commit()
+            return pk
         except Exception:
             # Don't let CascadeRun-write failures surface to the
             # caller — the cascade's primary outputs (the two
@@ -608,9 +666,10 @@ class L3CascadeRunner:
             self.db.rollback()
             logger.exception(
                 "L3 cascade — failed to record CascadeRun row "
-                "(cascade_run_id=%s); cascade output is unaffected",
-                cascade_run_id,
+                "(cascade_run_label=%s); cascade output is unaffected",
+                cascade_run_label,
             )
+            return None
 
 
 __all__ = [
