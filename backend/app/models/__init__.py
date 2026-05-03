@@ -424,9 +424,14 @@ from azirella_data_model.planes import PlaneRegistration, Plane, PlaneRegistry  
 from . import analytics  # noqa: F401
 
 # 37. TMS Planning — Forecast, Capacity Targets, Transportation Plan
+# `TransportationPlan` + `TransportationPlanItem` migrated to Core in
+# §3.39 (PR #14). PlanStatus + PlanItemStatus are re-exported from Core
+# via tms_planning.py's noqa import shim.
 from .tms_planning import (
     ForecastMethod, PlanStatus, PlanItemStatus,
     ShippingForecast, CapacityTarget,
+)
+from azirella_data_model.transport_plan import (  # noqa: E402
     TransportationPlan, TransportationPlanItem,
 )
 

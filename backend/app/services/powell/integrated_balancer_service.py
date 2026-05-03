@@ -99,7 +99,7 @@ def _normalize_capacity_dict(
             )
     return normalized
 
-from app.models.tms_planning import (
+from azirella_data_model.transport_plan import (
     PlanStatus,
     PlanItemStatus,
     TransportationPlan,

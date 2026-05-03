@@ -1341,6 +1341,251 @@ def test_phase_3_41_trainer_returns_run_result_with_zero_examples(db) -> None:
     assert result.training_run_id.startswith("trainer_1_")
 
 
+# ===========================================================================
+# §3.41 Phase 3.4 — GraphSAGE inference-service wiring + A/B counters
+# ===========================================================================
+
+
+def _stub_model(*, carrier_id_per_item, rate_id_per_item=None, confidence=1.0,
+                model_version="stub_v1"):
+    """Return a stand-in :class:`GraphSAGEMovementPlannerModel` whose
+    ``predict`` emits the given carrier per draft item-id with the
+    given confidence. ``carrier_id_per_item`` is a dict ``{item_id:
+    carrier_id_or_None}``; missing keys → no prediction (heuristic
+    fallback). ``confidence`` may be a scalar (applied to every
+    prediction) or a dict ``{item_id: float}`` for mixed-confidence
+    tests."""
+    from app.services.powell.graphsage_movement_planner import (
+        GraphSAGEMovementPlannerModel,
+        GraphSAGEPredictionOutput,
+    )
+
+    class _Stub(GraphSAGEMovementPlannerModel):
+        def fit(self, training_data):
+            pass
+
+        def predict(self, inputs):
+            outputs = []
+            for fc in inputs.lane_volume_forecasts:
+                item_id = fc["item_id"]
+                if item_id not in carrier_id_per_item:
+                    continue
+                carrier = carrier_id_per_item[item_id]
+                conf = (
+                    confidence[item_id] if isinstance(confidence, dict)
+                    else confidence
+                )
+                outputs.append(GraphSAGEPredictionOutput(
+                    item_id=item_id,
+                    carrier_id=carrier,
+                    rate_id=(rate_id_per_item or {}).get(item_id),
+                    estimated_cost=None,
+                    confidence=conf,
+                    rationale={"source": "stub"},
+                ))
+            return outputs
+
+        def model_version(self):
+            return model_version
+
+    return _Stub()
+
+
+def test_phase_3_4_no_model_keeps_phase_2a(db) -> None:
+    """§3.41 Phase 3.4 baseline: when no model is passed, the planner
+    behaves exactly like Phase 2A — optimization_method stays
+    HEURISTIC_PHASE_2A and the new model counters are all 0."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=3)
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(tenant_id=1, config_id=1, period_start=date(2026, 5, 4))
+
+    assert result.items_with_carrier == 3
+    assert result.items_via_model == 0
+    assert result.model_heuristic_agreements == 0
+    assert result.model_heuristic_overrides == 0
+    assert result.items_via_heuristic_fallback == 3
+    assert result.model_version is None
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "HEURISTIC_PHASE_2A"
+    assert plan.optimization_metadata is None
+
+
+def test_phase_3_4_untrained_model_abstains_falls_back_to_heuristic(db) -> None:
+    """§3.41 Phase 3.4: an untrained TorchGraphSAGEMovementPlanner
+    emits confidence=0.0, so every item falls back to the heuristic.
+    optimization_method stays HEURISTIC_PHASE_2A; model_version is
+    captured for audit."""
+    from app.services.powell.graphsage_movement_planner import (
+        TorchGraphSAGEMovementPlanner,
+    )
+
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=3)
+
+    svc = MovementPlannerService(db)
+    model = TorchGraphSAGEMovementPlanner()
+    result = svc.plan_movement(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4),
+        model=model,
+    )
+
+    assert result.items_with_carrier == 3
+    assert result.items_via_model == 0
+    assert result.items_via_heuristic_fallback == 3
+    assert result.model_version == "graphsage_untrained"
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "HEURISTIC_PHASE_2A"
+    assert plan.optimization_metadata is not None
+    assert plan.optimization_metadata["graphsage_model_version"] == "graphsage_untrained"
+    assert plan.optimization_metadata["items_via_model"] == 0
+
+
+def test_phase_3_4_high_confidence_model_overrides_heuristic(db) -> None:
+    """§3.41 Phase 3.4: when the model returns a different carrier with
+    confidence ≥ threshold, the heuristic's choice is overridden;
+    optimization_method becomes GRAPHSAGE_PHASE_3_4 (every assignable
+    item went through the model)."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=3)
+
+    # Heuristic picks carrier 1 (cheaper); stub overrides to carrier 2.
+    model = _stub_model(
+        carrier_id_per_item={0: 2, 1: 2, 2: 2},
+        rate_id_per_item={0: 2, 1: 2, 2: 2},
+        confidence=0.9,
+        model_version="stub_override_v1",
+    )
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4),
+        model=model, model_confidence_threshold=0.5,
+    )
+
+    assert result.items_with_carrier == 3
+    assert result.items_via_model == 3
+    assert result.model_heuristic_overrides == 3
+    assert result.model_heuristic_agreements == 0
+    assert result.items_via_heuristic_fallback == 0
+    assert result.model_version == "stub_override_v1"
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "GRAPHSAGE_PHASE_3_4"
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.carrier_id == 2 for item in items)
+    assert all(item.rate_id == 2 for item in items)
+
+
+def test_phase_3_4_high_confidence_agreement_does_not_count_as_override(db) -> None:
+    """§3.41 Phase 3.4: when the model picks the same carrier as the
+    heuristic with confidence ≥ threshold, the assignment is counted as
+    an *agreement*, not an override; the heuristic's already-correct
+    rate id and cost are preserved."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    # Heuristic picks carrier 1; stub agrees on carrier 1.
+    model = _stub_model(
+        carrier_id_per_item={0: 1, 1: 1},
+        confidence=0.95,
+    )
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4),
+        model=model,
+    )
+
+    assert result.items_via_model == 2
+    assert result.model_heuristic_agreements == 2
+    assert result.model_heuristic_overrides == 0
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "GRAPHSAGE_PHASE_3_4"
+    items = db.query(TransportationPlanItem).all()
+    assert all(item.carrier_id == 1 for item in items)
+    assert all(item.estimated_cost == 1875.0 for item in items)  # heuristic cost preserved
+
+
+def test_phase_3_4_partial_confidence_produces_hybrid(db) -> None:
+    """§3.41 Phase 3.4: when the model is high-confidence on some items
+    and low-confidence on others, the result is GRAPHSAGE_HEURISTIC_HYBRID
+    and per-item splits land in items_via_model / items_via_heuristic_fallback."""
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=4)
+
+    # Items 0, 1: high-confidence override to carrier 2.
+    # Items 2, 3: low-confidence — heuristic stays.
+    model = _stub_model(
+        carrier_id_per_item={0: 2, 1: 2, 2: 2, 3: 2},
+        rate_id_per_item={0: 2, 1: 2, 2: 2, 3: 2},
+        confidence={0: 0.9, 1: 0.9, 2: 0.1, 3: 0.1},
+    )
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4),
+        model=model, model_confidence_threshold=0.5,
+    )
+
+    assert result.items_with_carrier == 4
+    assert result.items_via_model == 2
+    assert result.model_heuristic_overrides == 2
+    assert result.items_via_heuristic_fallback == 2
+
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "GRAPHSAGE_HEURISTIC_HYBRID"
+    # First two items overridden to carrier 2; last two stayed at carrier 1.
+    items = sorted(
+        db.query(TransportationPlanItem).all(),
+        key=lambda i: i.planned_pickup_date,
+    )
+    assert items[0].carrier_id == 2 and items[1].carrier_id == 2
+    assert items[2].carrier_id == 1 and items[3].carrier_id == 1
+
+
+def test_phase_3_4_model_predict_exception_falls_back_safely(db) -> None:
+    """§3.41 Phase 3.4: if ``model.predict`` throws, the planner returns
+    the heuristic result with optimization_method=HEURISTIC_PHASE_2A
+    (no items_via_model). This is Phase 3.5's robustness contract:
+    inference failures must never break planning."""
+    from app.services.powell.graphsage_movement_planner import (
+        GraphSAGEMovementPlannerModel,
+    )
+
+    class _ThrowingModel(GraphSAGEMovementPlannerModel):
+        def fit(self, training_data): pass
+        def predict(self, inputs):
+            raise RuntimeError("simulated inference failure")
+        def model_version(self):
+            return "throw_v1"
+
+    _seed_carrier_and_rate_cards(db)
+    _seed_lane_profile(db)
+    _seed_lane_volume_plan(db, lane_id=10, mode="FTL", equipment_type="DRY_VAN", forecast_loads_p50=2)
+
+    svc = MovementPlannerService(db)
+    result = svc.plan_movement(
+        tenant_id=1, config_id=1, period_start=date(2026, 5, 4),
+        model=_ThrowingModel(),
+    )
+
+    assert result.items_with_carrier == 2
+    assert result.items_via_model == 0
+    assert result.items_via_heuristic_fallback == 2
+    plan = db.query(TransportationPlan).one()
+    assert plan.optimization_method == "HEURISTIC_PHASE_2A"
+
+
 def test_phase_3_42_expired_commitments_not_used(db) -> None:
     """A CarrierCapacityCommitment with effective_to in the past is
     excluded from the resolved capacity."""
