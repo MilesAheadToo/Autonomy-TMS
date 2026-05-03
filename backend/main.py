@@ -573,6 +573,14 @@ async def startup_event():
             from app.services.powell.l3_cascade_jobs import register_l3_cascade_jobs
             register_l3_cascade_jobs(scheduler_service)
 
+            # Register §3.43 ProductLane aggregator (daily 2am — three
+            # hours before L3 cascade so the lifecycle reactor reads
+            # fresh-aggregated lane shares when the cascade fires).
+            from app.services.powell.lifecycle_aggregator_jobs import (
+                register_lifecycle_aggregator_jobs,
+            )
+            register_lifecycle_aggregator_jobs(scheduler_service)
+
             # Register executive briefing scheduler (hourly check for scheduled generation)
             from app.services.executive_briefing_jobs import register_executive_briefing_jobs
             register_executive_briefing_jobs(scheduler_service)

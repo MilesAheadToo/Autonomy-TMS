@@ -27,9 +27,10 @@ Service shape:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -43,6 +44,14 @@ from app.services.powell.tms_heuristic_library import (
     compute_segmented_loads,
     compute_tms_decision,
 )
+
+if TYPE_CHECKING:
+    from app.services.powell.lane_volume_lifecycle_reactor import (
+        LaneVolumeLifecycleReactor,
+    )
+
+
+logger = logging.getLogger(__name__)
 
 
 _NO_SEG_MODE = "ALL"
@@ -93,6 +102,7 @@ class TacticalForecastService:
         scenario_id: Optional[int] = None,
         produced_by: str = "TacticalForecastService",
         plan_version: str = DEFAULT_PLAN_VERSION,
+        lifecycle_reactor: Optional["LaneVolumeLifecycleReactor"] = None,
     ) -> PublishResult:
         """Compute L1 forecasts per input, write per-mode + per-equipment
         rows to ``lane_volume_plan``.
@@ -100,12 +110,45 @@ class TacticalForecastService:
         Returns a :class:`PublishResult` with rows-written + skipped count
         + the actual ORM rows. Caller is responsible for ``commit()``;
         the service ``add()``s and ``flush()``es but does not commit.
+
+        ``lifecycle_reactor`` (§3.40 Phase 3b / §3.45): when supplied,
+        compute lifecycle overlays from DP's per-product adjustments
+        once at the top of the run, and apply each overlay to the
+        matching ``LaneVolumeForecastState`` (keyed on ``(lane_id,
+        period_start)``) before invoking the L1 TRM. The reactor only
+        sets ``signal_type`` / ``signal_magnitude`` / ``signal_confidence``
+        when no upstream signal is already set (refuses to clobber a
+        PROMO_LIFT or other non-lifecycle signal). Optional —
+        callers without a reactor see no behaviour change.
         """
         rows: List[LaneVolumePlan] = []
         per_lane: dict = {}
         skipped_deferred = 0
 
+        # §3.45 lifecycle overlay computation — once per publish call,
+        # not per input. Empty dict when no reactor was supplied or
+        # when no overlays match.
+        lifecycle_overlays = {}
+        if lifecycle_reactor is not None:
+            try:
+                lifecycle_overlays = lifecycle_reactor.compute_overlays(
+                    self.db, tenant_id=tenant_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "TacticalForecastService: lifecycle overlay "
+                    "computation failed for tenant=%s — proceeding without "
+                    "overlays. exc=%s",
+                    tenant_id, exc,
+                )
+
         for inp in inputs:
+            # Apply lifecycle overlay to this input's state before the
+            # TRM runs. apply_to_state mutates in place; the L1 TRM
+            # then sees the signal_type='NPI'/'EOL' overlay through
+            # the existing signal-overlay hooks.
+            if lifecycle_reactor is not None and lifecycle_overlays:
+                lifecycle_reactor.apply_to_state(inp.state, lifecycle_overlays)
             decision = compute_tms_decision("lane_volume_forecast", inp.state)
             params = decision.params_used
 
