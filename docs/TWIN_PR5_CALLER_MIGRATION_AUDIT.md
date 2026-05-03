@@ -231,18 +231,22 @@ This audit doc. Outputs:
 
 No code changes.
 
-### 5.B — Cut the SCP-shape pipeline from TMS
+### 5.B — Cut the SCP-shape pipeline from TMS — **shipped 2026-05-03**
 
-Concrete plan, finalised 2026-05-03 after the open questions above were
-resolved:
+Plan finalised 2026-05-03 after the open questions below were resolved.
+Landed by acer-nitro the same day:
 
-1. **Delete** [`backend/app/services/deployment_pipeline_service.py`](../backend/app/services/deployment_pipeline_service.py) (535 lines).
-2. **Delete** [`backend/scripts/training/train_food_dist_models.py`](../backend/scripts/training/train_food_dist_models.py) (388 lines).
-3. **Delete** [`backend/app/services/simulation_data_converter.py`](../backend/app/services/simulation_data_converter.py) (738 lines).
-4. **In** [`backend/app/api/endpoints/deployment.py`](../backend/app/api/endpoints/deployment.py): delete the orchestration routes — `POST /pipelines` (line 127), `GET /pipelines` (line 169), `GET /pipelines/{id}` (line 203), `GET /pipelines/{id}/steps/{step}` (line 221), `POST /pipelines/{id}/cancel` (line 255). **Keep** `GET /csvs/{pipeline_id}` (line 283) and `GET /csvs/{pipeline_id}/{csv_type}` (line 329) — these read SAP CSV exports the user salvages per Q2.
-5. **Keep** [`backend/app/models/deployment_pipeline.py`](../backend/app/models/deployment_pipeline.py) and the `deployment_pipeline_run` table — the `/csvs/...` endpoints look up by `pipeline_id` so the table stays as the audit trail. (If a future PR proves the CSV endpoints can be parameterised on `config_id` instead, the table can drop then.)
-6. **Audit** [`PowellTrainingService.train_sop_graphsage`](../backend/app/services/powell/powell_training_service.py) and `.train_execution_tgnn`. Both are called only from the deletees. If grep confirms no other TMS caller, delete those methods too. (Non-blocking — they can stay as dead-but-not-harmful code if removing them turns out to touch more surface than expected.)
-7. **Audit** [`backend/app/services/dag_simulator.py`](../backend/app/services/dag_simulator.py) (the deterministic SCP simulator) — it's referenced by the deletees plus a `replay_history`-style usage in SCP. Likely also SCP-fork residue but lower priority and out of 5.B's scope; flag for a follow-up.
+1. **Deleted** [`backend/app/services/deployment_pipeline_service.py`](../backend/app/services/deployment_pipeline_service.py) (535 lines).
+2. **Deleted** [`backend/scripts/training/train_food_dist_models.py`](../backend/scripts/training/train_food_dist_models.py) (388 lines).
+3. **Deleted** [`backend/app/services/simulation_data_converter.py`](../backend/app/services/simulation_data_converter.py) (738 lines).
+4. **Slimmed** [`backend/app/api/endpoints/deployment.py`](../backend/app/api/endpoints/deployment.py) from 369 lines → 117 lines: dropped `POST /pipelines`, `GET /pipelines`, `GET /pipelines/{id}`, `GET /pipelines/{id}/steps/{step}`, `POST /pipelines/{id}/cancel`, and the four Pydantic models / two private helpers (`PipelineCreateRequest`, `PipelineResponse`, `PipelineListResponse`, `_pipeline_to_response`, `_run_pipeline_background`) that only those routes used. **Kept** `GET /csvs/{pipeline_id}` and `GET /csvs/{pipeline_id}/{csv_type}` so SAP CSV downloads still work standalone (per Q2). Module docstring updated to record the cut.
+5. **Kept** [`backend/app/models/deployment_pipeline.py`](../backend/app/models/deployment_pipeline.py) and the `deployment_pipeline_run` table — the `/csvs/...` endpoints look up by `pipeline_id` so the table stays as the audit / lookup index. (If a future PR proves the CSV endpoints can be parameterised on `config_id` instead, the table can drop then.)
+6. **Did NOT delete** `PowellTrainingService.train_sop_graphsage` / `.train_execution_tgnn`. Pre-flight grep showed live callers in `scripts/train_powell_models.py`, `scripts/prepare_powell_demo.py`, `services/provisioning_service.py`, and `services/powell/generic_training_orchestrator.py` — the audit's earlier "called only from the deletees" assumption was wrong. Out of 5.B scope; revisit if those callers also turn out to be SCP-fork residue.
+7. **Did NOT delete** [`backend/app/services/dag_simulator.py`](../backend/app/services/dag_simulator.py) — out of 5.B scope. Flagged for a follow-up audit.
+
+Test impact: zero. No tests reference the deletees or the orchestration
+endpoint surface. The full `tests/services/digital_twin/` suite stays
+green (1 pre-existing main-branch failure unrelated to PR-5.B).
 
 **Open questions — resolved 2026-05-03:**
 
