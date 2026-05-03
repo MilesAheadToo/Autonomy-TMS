@@ -224,7 +224,7 @@ class IntegratedBalancerService:
         unconstrained_plan_id: int,
         carrier_capacity: Optional[_CapacityDict] = None,
         resolve_capacity_from_db: bool = False,
-        cascade_run_id: Optional[str] = None,
+        cascade_run_id: Optional[int] = None,
         escalation_penalty: float = _DEFAULT_ESCALATION_PENALTY,
     ) -> BalanceResult:
         """Project the unconstrained plan onto the carrier-capacity
@@ -476,7 +476,7 @@ class IntegratedBalancerService:
         *,
         source_plan: TransportationPlan,
         source_items: Sequence[TransportationPlanItem],
-        cascade_run_id: Optional[str],
+        cascade_run_id: Optional[int],
         optimization_method: str,
     ) -> BalanceResult:
         constrained_plan = TransportationPlan(
