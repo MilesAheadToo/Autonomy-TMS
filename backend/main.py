@@ -569,6 +569,10 @@ async def startup_event():
             from app.services.planning_cascade_jobs import register_planning_cascade_jobs
             register_planning_cascade_jobs(scheduler_service)
 
+            # Register L3 transport cascade (daily 5am — MovementPlanner → IntegratedBalancer)
+            from app.services.powell.l3_cascade_jobs import register_l3_cascade_jobs
+            register_l3_cascade_jobs(scheduler_service)
+
             # Register executive briefing scheduler (hourly check for scheduled generation)
             from app.services.executive_briefing_jobs import register_executive_briefing_jobs
             register_executive_briefing_jobs(scheduler_service)
