@@ -632,17 +632,36 @@ class IntegratedBalancerService:
         # When equipment_type is None, the row sums all items on that
         # carrier (carrier-wide cap). When equipment_type is set, the
         # row sums only items matching that equipment.
-        capacity_keys = sorted(normalised.keys())  # deterministic order
+        # Deterministic order. Capacity keys are ``(carrier_id,
+        # equipment_type)`` tuples where ``equipment_type`` may be
+        # ``None`` (carrier-wide cap) or a string (per-equipment cap).
+        # Sort with ``""`` as the None-substitute so Python 3 doesn't
+        # raise on ``None`` vs ``str`` comparison when both shapes
+        # appear in the dict.
+        capacity_keys = sorted(
+            normalised.keys(),
+            key=lambda k: (k[0], k[1] or ""),
+        )
         n_capacity_constraints = len(capacity_keys)
         A_ub = np.zeros((n_capacity_constraints, n_vars))
         b_ub = np.zeros(n_capacity_constraints)
         carrier_idx_by_id = {c: idx for idx, c in enumerate(carriers)}
+        import math as _math
         for k, (carrier_id, equipment_type) in enumerate(capacity_keys):
             j = carrier_idx_by_id[carrier_id]
             for i, item in enumerate(items):
                 if equipment_type is None or item.equipment_type == equipment_type:
                     A_ub[k, i * n_carriers + j] = 1
-            b_ub[k] = float(normalised[(carrier_id, equipment_type)])
+            # Floor fractional caps before feeding the LP. The
+            # transportation-style polytope has integer vertices only
+            # when caps are integers; passing a fractional cap (e.g.,
+            # 7.69 from §3.42 Phase 3.3 prorating) lets the LP relax
+            # to fractional ``x_ij`` and the argmax-rounding then
+            # over-assigns items beyond the integer-feasible cap.
+            # Flooring matches the semantics described in the
+            # §3.42 Phase 3.3 register entry ("100 × 7/91 = 7.69 →
+            # floor to 7 fittable items").
+            b_ub[k] = float(_math.floor(normalised[(carrier_id, equipment_type)]))
 
         bounds = [(0, 1)] * n_vars
 
