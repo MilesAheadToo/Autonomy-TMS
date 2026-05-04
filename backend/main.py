@@ -6886,7 +6886,6 @@ from app.api.endpoints import (
     site_agent_router,
     insights_router,
     planning_cascade_router,
-    deployment_router,
 )
 from app.api.endpoints.sap_atp import router as sap_atp_router
 
@@ -6921,7 +6920,6 @@ api.include_router(sap_change_simulator_router, tags=["sap-change-simulator"])
 api.include_router(site_agent_router, tags=["site-agent"])
 api.include_router(insights_router, tags=["insights"])
 api.include_router(planning_cascade_router, prefix="/planning-cascade", tags=["planning-cascade"])
-api.include_router(deployment_router, prefix="/deployment", tags=["deployment"])
 
 
 api.include_router(knowledge_base_router, tags=["knowledge-base"])
