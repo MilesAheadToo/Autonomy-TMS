@@ -31,9 +31,9 @@ _BUILDER_PATH = os.path.join(
 def _load_builder_module():
     # The builder module imports from
     # ``app.services.powell.tactical_forecast_service`` and
-    # ``tms_heuristic_library``, both of which transitively pull in
-    # the heavy app.services.powell.__init__. We pre-load only the
-    # essentials via stub modules in sys.modules so importlib can
+    # ``autonomy_tms_heuristics.library``, both of which transitively
+    # pull in the heavy app.services.powell.__init__. We pre-load only
+    # the essentials via stub modules in sys.modules so importlib can
     # exec the builder cleanly.
     import types
 
@@ -52,8 +52,8 @@ def _load_builder_module():
 
     # Stub LaneVolumeForecastState — simple dataclass with the fields
     # the builder writes to. We don't need full TRM behaviour.
-    if "app.services.powell.tms_heuristic_library" not in sys.modules:
-        thl_stub = types.ModuleType("app.services.powell.tms_heuristic_library")
+    if "autonomy_tms_heuristics.library" not in sys.modules:
+        thl_stub = types.ModuleType("autonomy_tms_heuristics.library")
         from dataclasses import dataclass, field
         from datetime import date as _date
         from typing import Optional
@@ -90,7 +90,7 @@ def _load_builder_module():
             last_period_actual: float = 0.0
             forecast_interval_width_pct: float = 0.0
         thl_stub.LaneVolumeForecastState = LaneVolumeForecastState
-        sys.modules["app.services.powell.tms_heuristic_library"] = thl_stub
+        sys.modules["autonomy_tms_heuristics.library"] = thl_stub
 
     # Pre-register parent packages.
     for parent in ("app", "app.services", "app.services.powell"):

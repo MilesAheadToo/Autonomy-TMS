@@ -41,7 +41,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.services.powell.tactical_forecast_service import LaneForecastInput
-from app.services.powell.tms_heuristic_library import LaneVolumeForecastState
+from autonomy_tms_heuristics.library import LaneVolumeForecastState
 
 logger = logging.getLogger(__name__)
 

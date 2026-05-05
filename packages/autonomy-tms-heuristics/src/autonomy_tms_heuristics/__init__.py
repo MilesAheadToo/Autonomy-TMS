@@ -1,25 +1,32 @@
 """autonomy-tms-heuristics — TMS-team-owned heuristic policies (AD-12).
 
-Same content (haversine ETA, ship-as-is consolidation, tenant-default
-carrier) is consumed in two places:
+This package is the **single authoritative source** of TMS conservative-
+default heuristic math, used by three consumer paths (PR-LOCK, 2026-05-04):
 
-1. **HEURISTIC-tier runtime dispatch** by ``azirella-router``, when a
-   tenant's TMS plane resolves to HEURISTIC. The router discovers this
-   package via Python entry point (``azirella_router.heuristics`` →
-   ``tms``) and calls :func:`get_handler_bundle` to fetch the dispatch
-   surface.
-
-2. **Training-baseline policies** for TMS RL training pipelines. The
-   training script imports :data:`HEURISTIC_HANDLERS` directly and
-   wraps it in a baseline policy adapter for ``RolloutHarness``.
+1. **Internal TRM runtime fallback** — every TMS TRM in
+   ``backend/app/services/powell/`` calls
+   :func:`compute_tms_decision` (re-exported below) when its trained
+   BC checkpoint is unavailable.
+2. **Internal training corpus generation** — TMS pretraining scripts
+   (``backend/scripts/pretraining/generate_tms_corpus.py``,
+   ``trm_curriculum.py``) use :func:`compute_tms_decision` as the BC
+   teacher policy. Same function as the runtime fallback; training
+   labels and runtime fallback are guaranteed to agree.
+3. **Cross-plane HEURISTIC-tier dispatch** by ``azirella-router`` —
+   :data:`HEURISTIC_HANDLERS` is the entry-point bundle. Each handler
+   builds the corresponding state dataclass from a cross-plane skill
+   input, dispatches via :func:`compute_tms_decision`, and maps the
+   result back to the cross-plane response shape.
 
 This package depends only on:
 - ``azirella-data-model`` (for ``ConformalBand``, geofence haversine math)
-- ``azirella-heuristics-common`` (for the four-place warning regime + exceptions)
+- ``azirella-heuristics-common`` (for the four-place warning regime
+  + exceptions)
 
-It does NOT depend on the TMS backend app — it ships separately so
-SCP / DP backends can pip-install it for in-process HEURISTIC dispatch
-without pulling in the TMS app.
+It does NOT depend on the TMS backend app — the TMS backend pip-installs
+it like SCP/DP backends do, so the same import path
+``autonomy_tms_heuristics.library.compute_tms_decision`` works in
+every consumer environment.
 """
 from .handlers import (
     HEURISTIC_HANDLERS,
@@ -30,17 +37,55 @@ from .handlers import (
     recommend_carrier,
     refuse_write,
 )
-from .eta import BUILT_IN_DEFAULTS, ETAResult, estimate_eta
+from .library import (
+    Actions,
+    BUILT_IN_DEFAULTS,
+    BrokerRoutingState,
+    CapacityBufferState,
+    CapacityPromiseState,
+    DemandSensingState,
+    DockSchedulingState,
+    ETAResult,
+    EquipmentRepositionState,
+    ExceptionManagementState,
+    FreightProcurementState,
+    IntermodalTransferState,
+    LaneVolumeForecastState,
+    LoadBuildState,
+    ShipmentTrackingState,
+    TMSHeuristicDecision,
+    compute_segmented_loads,
+    compute_tms_decision,
+    estimate_eta,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
+    # Library — state dataclasses + dispatch
+    "Actions",
     "BUILT_IN_DEFAULTS",
+    "BrokerRoutingState",
+    "CapacityBufferState",
+    "CapacityPromiseState",
+    "DemandSensingState",
+    "DockSchedulingState",
     "ETAResult",
+    "EquipmentRepositionState",
+    "ExceptionManagementState",
+    "FreightProcurementState",
+    "IntermodalTransferState",
+    "LaneVolumeForecastState",
+    "LoadBuildState",
+    "ShipmentTrackingState",
+    "TMSHeuristicDecision",
+    "compute_segmented_loads",
+    "compute_tms_decision",
+    "estimate_eta",
+    # Cross-plane handler bundle
     "HEURISTIC_HANDLERS",
     "HEURISTIC_PRODUCER_SIGNATURE",
     "HEURISTIC_WRITE_SKILLS",
-    "estimate_eta",
     "estimate_lane_eta",
     "evaluate_consolidation",
     "get_handler_bundle",
@@ -52,11 +97,11 @@ __all__ = [
 def get_handler_bundle():
     """Entry-point factory for ``azirella-router``'s plugin discovery.
 
-    Wraps :data:`HEURISTIC_HANDLERS`, :data:`HEURISTIC_WRITE_SKILLS`, and
-    :func:`refuse_write` into a :class:`HeuristicPlaneBundle` the router
-    can consume. Lazy-imports ``azirella_router`` so this package can be
-    imported without it (e.g. by training scripts using the handlers
-    directly).
+    Wraps :data:`HEURISTIC_HANDLERS`, :data:`HEURISTIC_WRITE_SKILLS`,
+    and :func:`refuse_write` into a :class:`HeuristicPlaneBundle` the
+    router can consume. Lazy-imports ``azirella_router`` so this
+    package can be imported without it (e.g. by training scripts using
+    the handlers directly).
     """
     from azirella_router import HeuristicPlaneBundle
     return HeuristicPlaneBundle(

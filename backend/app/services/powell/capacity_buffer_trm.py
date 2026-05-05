@@ -96,10 +96,10 @@ class CapacityBufferTRM:
         self.config_id = config_id
         self._model = None
 
-        from app.services.powell.tms_heuristic_library.dispatch import (
+        from autonomy_tms_heuristics.library.dispatch import (
             compute_tms_decision,
         )
-        from app.services.powell.tms_heuristic_library.base import (
+        from autonomy_tms_heuristics.library.base import (
             CapacityBufferState,
         )
         self._compute_decision = compute_tms_decision

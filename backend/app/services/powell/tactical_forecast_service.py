@@ -39,7 +39,7 @@ from azirella_data_model.transport_plan import (
     LaneVolumePlan,
 )
 
-from app.services.powell.tms_heuristic_library import (
+from autonomy_tms_heuristics.library import (
     LaneVolumeForecastState,
     compute_segmented_loads,
     compute_tms_decision,
@@ -354,7 +354,7 @@ class TacticalForecastService:
 
 # Re-export the segmentation helper at this module level too so callers
 # constructing scenarios without the L1 TRM can reach the same math without
-# pulling in `tms_heuristic_library` directly.
+# pulling in `autonomy_tms_heuristics.library` directly.
 __all__ = [
     "LaneForecastInput",
     "PublishResult",

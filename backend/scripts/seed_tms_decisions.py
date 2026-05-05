@@ -44,7 +44,7 @@ from app.models.tms_entities import (
 from app.models.transportation_config import LaneProfile, FacilityConfig
 from app.models.tms_planning import ShippingForecast
 from app.models.supply_chain_config import Site, TransportationLane
-from app.services.powell.tms_heuristic_library.base import (
+from autonomy_tms_heuristics.library.base import (
     CapacityPromiseState,
     ShipmentTrackingState,
     DemandSensingState,
@@ -58,7 +58,7 @@ from app.services.powell.tms_heuristic_library.base import (
     EquipmentRepositionState,
     TMSHeuristicDecision,
 )
-from app.services.powell.tms_heuristic_library.dispatch import (
+from autonomy_tms_heuristics.library.dispatch import (
     compute_tms_decision,
     Actions,
 )

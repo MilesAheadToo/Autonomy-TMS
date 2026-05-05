@@ -50,10 +50,10 @@ except ImportError:
 # GPU image has torch installed, so normal imports work fine.
 # CPU-only environments without torch need the installed package to have
 # torch stubbed or optional — for now this script targets the GPU container.
-from app.services.powell.tms_heuristic_library.dispatch import (
+from autonomy_tms_heuristics.library.dispatch import (
     compute_tms_decision, Actions,
 )
-from app.services.powell.tms_heuristic_library.base import (
+from autonomy_tms_heuristics.library.base import (
     CapacityPromiseState,
     ShipmentTrackingState,
     DemandSensingState,

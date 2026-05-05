@@ -5,6 +5,18 @@ azirella-integrations @ git+https://github.com/azirella-ltd/Autonomy-Core.git@0e
 azirella-demand-planning-contract @ git+https://github.com/azirella-ltd/Autonomy-Core.git@0ea03b8#subdirectory=packages/demand-planning-contract
 azirella-transfer-order-envelope-contract @ git+https://github.com/azirella-ltd/Autonomy-Core.git@0ea03b8#subdirectory=packages/transfer-order-envelope-contract
 azirella-a2a-client @ git+https://github.com/azirella-ltd/Autonomy-Core.git@0ea03b8#subdirectory=packages/a2a-client
+# azirella-heuristics-common — warning regime + exception substrate. Dep
+# of autonomy-tms-heuristics' cross-plane handlers; canonical home for
+# AZIRELLA-STUB-WARNING marker + HeuristicWriteRefused.
+azirella-heuristics-common @ git+https://github.com/azirella-ltd/Autonomy-Core.git@12e47c4#subdirectory=packages/azirella-heuristics-common
+# autonomy-tms-heuristics — single authoritative source of TMS conservative-
+# default heuristic math (PR-LOCK, 2026-05-04). Used by (1) internal TRM
+# runtime fallback via compute_tms_decision, (2) BC training-corpus labels,
+# (3) cross-plane HEURISTIC-tier dispatch. Editable install for in-repo dev;
+# flip to a git pin
+# (autonomy-tms-heuristics @ git+https://github.com/azirella-ltd/Autonomy-TMS.git@<merge-sha>#subdirectory=packages/autonomy-tms-heuristics)
+# once this PR merges. See PR-LOCK in TWIN_REWRITE_PLAN.md.
+-e ./packages/autonomy-tms-heuristics
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
