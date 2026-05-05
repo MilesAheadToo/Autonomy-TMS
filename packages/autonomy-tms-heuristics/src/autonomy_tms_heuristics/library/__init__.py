@@ -34,9 +34,11 @@ heuristics, used by three consumer paths:
 
 This file used to live at
 ``backend/app/services/powell/tms_heuristic_library/`` (relocated here
-2026-05-04 to make the package the canonical home; the prior in-repo
-location duplicated math against ``eta.py`` in this same package, which
-is the drift the consolidation prevents).
+2026-05-04 to make the package the canonical home per §3.52 Phase 1A).
+The cross-plane ETA math in :mod:`autonomy_tms_heuristics.eta` stays at
+the package root rather than moving into this library, per §3.52 step 3:
+lane-ETA-pre-dispatch isn't a TMS internal TRM, so there's no internal
+caller to deduplicate against today.
 
 The library is **single-implementation, ERP-source-agnostic** —
 transportation operations follow standard industry practice across
@@ -61,17 +63,14 @@ from .base import (
     TMSHeuristicDecision,
 )
 from .dispatch import Actions, compute_segmented_loads, compute_tms_decision
-from .lane_eta import BUILT_IN_DEFAULTS, ETAResult, estimate_eta
 
 __all__ = [
     "Actions",
-    "BUILT_IN_DEFAULTS",
     "BrokerRoutingState",
     "CapacityBufferState",
     "CapacityPromiseState",
     "DemandSensingState",
     "DockSchedulingState",
-    "ETAResult",
     "EquipmentRepositionState",
     "ExceptionManagementState",
     "FreightProcurementState",
@@ -82,5 +81,4 @@ __all__ = [
     "TMSHeuristicDecision",
     "compute_segmented_loads",
     "compute_tms_decision",
-    "estimate_eta",
 ]

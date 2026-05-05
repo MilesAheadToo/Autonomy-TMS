@@ -234,9 +234,14 @@ def test_estimate_lane_eta_dispatches_through_library_estimate_eta() -> None:
     assert seen_calls == [("estimate_eta", "S001", "S002")]
 
 
-def test_no_eta_module_exists() -> None:
-    """The legacy ``autonomy_tms_heuristics.eta`` module is removed; ETA
-    math now lives only in ``autonomy_tms_heuristics.library.lane_eta``.
-    Asserts the deduplication landed cleanly."""
-    with pytest.raises(ImportError):
-        import autonomy_tms_heuristics.eta  # noqa: F401
+def test_eta_module_lives_at_package_root() -> None:
+    """Per §3.52 step 3, ``autonomy_tms_heuristics.eta`` stays at the
+    package root rather than moving into ``library/`` — lane-ETA-pre-
+    dispatch has no TMS internal TRM consumer to deduplicate against
+    today. The module must be importable; ``estimate_eta`` is the
+    canonical entry point."""
+    import autonomy_tms_heuristics.eta as eta_module
+
+    assert callable(eta_module.estimate_eta)
+    assert hasattr(eta_module, "ETAResult")
+    assert hasattr(eta_module, "BUILT_IN_DEFAULTS")

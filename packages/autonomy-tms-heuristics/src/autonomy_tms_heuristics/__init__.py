@@ -28,6 +28,7 @@ it like SCP/DP backends do, so the same import path
 ``autonomy_tms_heuristics.library.compute_tms_decision`` works in
 every consumer environment.
 """
+from .eta import BUILT_IN_DEFAULTS, ETAResult, estimate_eta
 from .handlers import (
     HEURISTIC_HANDLERS,
     HEURISTIC_PRODUCER_SIGNATURE,
@@ -39,13 +40,11 @@ from .handlers import (
 )
 from .library import (
     Actions,
-    BUILT_IN_DEFAULTS,
     BrokerRoutingState,
     CapacityBufferState,
     CapacityPromiseState,
     DemandSensingState,
     DockSchedulingState,
-    ETAResult,
     EquipmentRepositionState,
     ExceptionManagementState,
     FreightProcurementState,
@@ -56,7 +55,6 @@ from .library import (
     TMSHeuristicDecision,
     compute_segmented_loads,
     compute_tms_decision,
-    estimate_eta,
 )
 
 __version__ = "0.1.0"

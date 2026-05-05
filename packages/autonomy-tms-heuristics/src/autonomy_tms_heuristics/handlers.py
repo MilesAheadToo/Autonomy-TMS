@@ -17,11 +17,14 @@ Pattern (locked in 2026-05-04 — "PR-LOCK"):
      skill's payload contract.
   4. Stamp the four-place warning regime.
 
-ETA is the exception: ``library.lane_eta.estimate_eta`` is a pure math
-primitive (haversine + speed model) rather than a dispatch entry, since
-no internal TRM consumes pre-dispatch ETA-from-coordinates as a fallback
-today. It still lives in the same library so future internal consumers
-can adopt it without duplicating math.
+ETA is the exception per §3.52 step 3: :func:`autonomy_tms_heuristics.eta.estimate_eta`
+stays at the package root rather than moving into :mod:`library`,
+because lane-ETA-pre-dispatch isn't a TMS internal TRM (the closest
+internal TRM, ``_compute_shipment_tracking``, evaluates in-flight
+progress — a different decision). Until an internal consumer of
+pre-dispatch ETA emerges, the math has no internal call site to
+deduplicate against, so it stays where the cross-plane handler that
+does call it can find it.
 """
 from __future__ import annotations
 
@@ -34,12 +37,12 @@ from azirella_heuristics_common import (
     stamp_heuristic_response,
 )
 
+from .eta import estimate_eta
 from .library import (
     Actions,
     FreightProcurementState,
     LoadBuildState,
     compute_tms_decision,
-    estimate_eta,
 )
 
 logger = logging.getLogger(__name__)
