@@ -106,35 +106,19 @@ class GNNOrchestrationService:
             result["errors"].append(f"sop_inference: {e}")
 
         # --- Step 2: Tactical Hive Coordinator (3-parallel tGNNs) ---
-        # DEPRECATED import kept for backward compatibility — use TacticalHiveCoordinator below.
-        # from app.services.powell.execution_gnn_inference_service import ExecutionGNNInferenceService
+        # PR-5.E (2026-05-05) — TacticalHiveCoordinator + the 4 SCP-shape
+        # tactical tGNN services were deleted. The tactical phase is a
+        # no-op until §1.13 / §3.41 land TMS-shape tactical-tier
+        # services in Core. Downstream methods (_merge_outputs,
+        # _apply_planning_trm_adjustments, _persist_directive_reviews,
+        # _broadcast_directives) already short-circuit when
+        # ``tactical_output is None``.
         tactical_output = None
         exec_output = None  # kept for _persist_directive_reviews compatibility
-        try:
-            from app.services.powell.tactical_hive_coordinator import TacticalHiveCoordinator
-
-            coordinator = TacticalHiveCoordinator(self.db, self.config_id, tenant_id=self.tenant_id)
-            tactical_output = await coordinator.run_lateral_cycle(
-                sop_embeddings=sop_embeddings,
-                force_recompute=force_recompute,
-            )
-            result["execution_output"] = {
-                "num_sites": len(tactical_output.site_keys),
-                "lateral_iterations": tactical_output.lateral_iterations,
-                "computed_at": tactical_output.computed_at.isoformat(),
-                "demand_checkpoint": tactical_output.demand.checkpoint_path,
-                "supply_checkpoint": tactical_output.supply.checkpoint_path,
-                "inventory_checkpoint": tactical_output.inventory.checkpoint_path,
-            }
-            # Expose sub-outputs for _persist_directive_reviews
-            exec_output = tactical_output.supply  # supply tGNN carries exception_probability
-            logger.info(
-                f"Tactical Hive Coordinator: {len(tactical_output.site_keys)} sites, "
-                f"{tactical_output.lateral_iterations} lateral iteration(s)"
-            )
-        except Exception as e:
-            logger.warning(f"Tactical Hive Coordinator failed: {e}")
-            result["errors"].append(f"tactical_hive: {e}")
+        result["execution_output"] = {
+            "skipped": "tactical_hive_coordinator removed in PR-5.E; "
+            "awaiting Core port of TMS-shape tactical tier"
+        }
 
         # --- Step 3: Merge outputs ---
         gnn_outputs = self._merge_outputs(sop_analysis, tactical_output)
@@ -247,40 +231,32 @@ class GNNOrchestrationService:
                     "safety_stock_multiplier": sop_analysis.safety_stock_multiplier.get(site_key, 1.0),
                 }
 
-        # Overlay TacticalHiveOutput (3-parallel tGNNs)
+        # PR-5.E (2026-05-05) — overlay path for TacticalHiveOutput
+        # removed along with tactical_hive_coordinator. ``tactical_output``
+        # is permanently ``None`` until §1.13 / §3.41 land TMS-shape
+        # tactical-tier services in Core. The legacy ExecutionGNNOutput
+        # branch is preserved below in case execution_gnn_inference_service
+        # output is wired in directly during the interim.
         if tactical_output is not None:
-            from app.services.powell.tactical_hive_coordinator import TacticalHiveOutput
-            if isinstance(tactical_output, TacticalHiveOutput):
-                for site_key, values in tactical_output.merged_per_site.items():
-                    if site_key not in merged:
-                        merged[site_key] = {
-                            "criticality_score": 0.5,
-                            "bottleneck_risk": 0.3,
-                            "concentration_risk": 0.2,
-                            "resilience_score": 0.7,
-                            "safety_stock_multiplier": 1.0,
-                        }
-                    # merged_per_site already has backward-compatible keys
-                    merged[site_key].update(values)
-            else:
-                # Legacy ExecutionGNNOutput path (should not be reached after migration)
-                exec_output = tactical_output
-                for site_key in exec_output.site_keys:
-                    if site_key not in merged:
-                        merged[site_key] = {
-                            "criticality_score": 0.5,
-                            "bottleneck_risk": 0.3,
-                            "concentration_risk": 0.2,
-                            "resilience_score": 0.7,
-                            "safety_stock_multiplier": 1.0,
-                        }
-                    merged[site_key].update({
-                        "demand_forecast": exec_output.demand_forecast.get(site_key, []),
-                        "exception_probability": exec_output.exception_probability.get(site_key, 0.1),
-                        "order_recommendation": exec_output.order_recommendation.get(site_key, 0),
-                        "confidence": exec_output.confidence.get(site_key, 0.5),
-                        "propagation_impact": exec_output.propagation_impact.get(site_key, []),
-                    })
+            # Legacy ExecutionGNNOutput path — direct
+            # ExecutionGNNInferenceService output (no TacticalHiveCoordinator).
+            exec_output = tactical_output
+            for site_key in exec_output.site_keys:
+                if site_key not in merged:
+                    merged[site_key] = {
+                        "criticality_score": 0.5,
+                        "bottleneck_risk": 0.3,
+                        "concentration_risk": 0.2,
+                        "resilience_score": 0.7,
+                        "safety_stock_multiplier": 1.0,
+                    }
+                merged[site_key].update({
+                    "demand_forecast": exec_output.demand_forecast.get(site_key, []),
+                    "exception_probability": exec_output.exception_probability.get(site_key, 0.1),
+                    "order_recommendation": exec_output.order_recommendation.get(site_key, 0),
+                    "confidence": exec_output.confidence.get(site_key, 0.5),
+                    "propagation_impact": exec_output.propagation_impact.get(site_key, []),
+                })
 
         return merged
 
@@ -336,35 +312,19 @@ class GNNOrchestrationService:
         tactical_reasoning_map: Dict[str, Optional[str]] = {}
         tactical_confidence_map: Dict[str, float] = {}
 
+        # PR-5.E (2026-05-05) — TacticalHiveOutput reasoning composition
+        # removed along with tactical_hive_coordinator. Falls through to
+        # the legacy ExecutionGNNOutput path; tactical_reasoning_map /
+        # tactical_confidence_map stay empty when ``tactical_output``
+        # is None (the post-PR-5.E default).
         if tactical_output is not None:
-            from app.services.powell.tactical_hive_coordinator import TacticalHiveOutput
-            if isinstance(tactical_output, TacticalHiveOutput):
-                for sk in tactical_output.site_keys:
-                    parts = []
-                    dr = tactical_output.demand.reasoning.get(sk)
-                    sr = tactical_output.supply.reasoning.get(sk)
-                    ir = tactical_output.inventory.reasoning.get(sk)
-                    if dr:
-                        parts.append(f"[Demand] {dr}")
-                    if sr:
-                        parts.append(f"[Supply] {sr}")
-                    if ir:
-                        parts.append(f"[Inventory] {ir}")
-                    tactical_reasoning_map[sk] = " | ".join(parts) if parts else None
-                    # Average confidence across three domains
-                    confs = [
-                        tactical_output.demand.confidence.get(sk, 0.5),
-                        tactical_output.supply.confidence.get(sk, 0.5),
-                        tactical_output.inventory.confidence.get(sk, 0.5),
-                    ]
-                    tactical_confidence_map[sk] = sum(confs) / len(confs)
-            else:
-                # Legacy ExecutionGNNOutput
-                exec_output = tactical_output
-                if hasattr(exec_output, "reasoning") and exec_output.reasoning:
-                    for sk in getattr(exec_output, "site_keys", []):
-                        tactical_reasoning_map[sk] = exec_output.reasoning.get(sk)
-                        tactical_confidence_map[sk] = exec_output.confidence.get(sk, 0.5)
+            # Legacy ExecutionGNNOutput — direct ExecutionGNNInferenceService
+            # output. No TacticalHiveCoordinator.
+            exec_output = tactical_output
+            if hasattr(exec_output, "reasoning") and exec_output.reasoning:
+                for sk in getattr(exec_output, "site_keys", []):
+                    tactical_reasoning_map[sk] = exec_output.reasoning.get(sk)
+                    tactical_confidence_map[sk] = exec_output.confidence.get(sk, 0.5)
 
         count = 0
         now = datetime.utcnow()
@@ -404,13 +364,11 @@ class GNNOrchestrationService:
             if exec_values and tactical_output is not None:
                 exec_reasoning = tactical_reasoning_map.get(site_key)
                 confidence = tactical_confidence_map.get(site_key, exec_values.get("confidence", 0.5))
-                # Determine model_type based on output type
-                from app.services.powell.tactical_hive_coordinator import TacticalHiveOutput
-                model_type = (
-                    "tactical_hive"
-                    if isinstance(tactical_output, TacticalHiveOutput)
-                    else "execution_tgnn"
-                )
+                # PR-5.E (2026-05-05) — model_type was a ternary on
+                # TacticalHiveOutput vs ExecutionGNNOutput. Tactical
+                # branch removed along with tactical_hive_coordinator;
+                # only the execution branch remains.
+                model_type = "execution_tgnn"
                 review = GNNDirectiveReview(
                     config_id=self.config_id,
                     site_key=site_key,

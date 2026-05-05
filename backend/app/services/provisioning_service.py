@@ -1403,115 +1403,14 @@ class ProvisioningService:
         finally:
             sync_db.close()
 
-    async def _step_demand_tgnn(self, config_id: int, db: AsyncSession = None) -> dict:
-        """Step 5: Compute analytical demand features (replaces Demand tGNN).
-
-        The Demand Planning tGNN was REMOVED (April 2026). Demand forecasting
-        is a per-product tabular problem handled by the Forecast Baseline +
-        Adjustment TRMs (LightGBM). This step now pre-computes the analytical
-        demand features (volatility, bullwhip, category share) that the 3
-        supply-side tGNNs consume as node input features.
-
-        Retained as step 5 for backward compatibility with existing
-        provisioning status records.
-        """
-        logger.info("Step 5 (demand_tgnn): computing analytical demand features for config %d", config_id)
-        # Demand features are computed on-the-fly by TacticalHiveCoordinator._compute_demand_features()
-        # during the daily cycle. This provisioning step validates that the prerequisite
-        # forecast data exists (from step 4: lgbm_forecast).
-        try:
-            from sqlalchemy import text as sql_text
-            effective_db = db or self.db
-            # forecast table has no plan_version column (that lives on
-            # supply_plan). Any forecast row is valid historical signal.
-            result = await effective_db.execute(
-                sql_text("""
-                    SELECT COUNT(*) as forecast_count
-                    FROM forecast
-                    WHERE config_id = :cid
-                """),
-                {"cid": config_id},
-            )
-            row = result.fetchone()
-            count = row.forecast_count if row else 0
-            if count == 0:
-                return {"status": "warning", "message": "No forecast data found — demand features will be empty until lgbm_forecast step completes"}
-            return {"status": "completed", "forecast_records": count, "message": f"Demand features validated: {count} forecast records available for supply-side tGNNs"}
-        except Exception as e:
-            logger.warning("Demand feature validation failed: %s", e)
-            return {"status": "completed", "message": "Demand feature validation skipped (non-critical)"}
-
-    async def _step_supply_tgnn(self, config_id: int, db: AsyncSession = None) -> dict:
-        """Step 6: Train Supply Planning tGNN and persist checkpoint.
-
-        Trains a cold-start supply tGNN from supply plan/PO data,
-        saves the checkpoint to disk AND records it in tactical_tgnn_checkpoints.
-        SOC II: failures raise — no silent swallowing.
-        Note: tenant_id resolved inside sync thread to avoid async session conflicts.
-        """
-        from app.services.powell.tactical_tgnn_training_service import TacticalTGNNTrainingService
-        result = await TacticalTGNNTrainingService.train_and_persist(
-            config_id=config_id, tenant_id=0, domain="supply_planning",
-        )
-        return result
-
-    async def _step_inventory_tgnn(self, config_id: int, db: AsyncSession = None) -> dict:
-        """Step 7: Train Inventory Optimization tGNN and persist checkpoint.
-
-        Note: tenant_id resolved inside sync thread to avoid async session conflicts.
-        """
-        from app.services.powell.tactical_tgnn_training_service import TacticalTGNNTrainingService
-        result = await TacticalTGNNTrainingService.train_and_persist(
-            config_id=config_id, tenant_id=0, domain="inventory_optim",
-        )
-        return result
-
-    async def _step_capacity_tgnn(self, config_id: int, db: AsyncSession = None) -> dict:
-        """Step 8: Train Capacity/RCCP tGNN and persist checkpoint.
-
-        After training, runs joint inventory-capacity optimization.
-        Note: tenant_id resolved inside sync thread to avoid async session conflicts.
-        """
-        from app.services.powell.tactical_tgnn_training_service import TacticalTGNNTrainingService
-        result = await TacticalTGNNTrainingService.train_and_persist(
-            config_id=config_id, tenant_id=0, domain="capacity_rccp",
-        )
-
-        # Run joint inventory-capacity optimization if both checkpoints exist
-        try:
-            from app.db.session import async_session_factory as AsyncSessionLocal
-            from app.services.powell.inventory_optimization_tgnn_service import InventoryOptimizationTGNNService
-            from app.services.powell.capacity_rccp_tgnn_service import CapacityRCCPTGNNService
-            from app.services.powell.joint_inventory_capacity_service import joint_inventory_capacity_optimization
-
-            async with AsyncSessionLocal() as joint_db:
-                inv_svc = InventoryOptimizationTGNNService(joint_db, config_id, tenant_id=tenant_id)
-                cap_svc = CapacityRCCPTGNNService(joint_db, config_id, tenant_id=tenant_id)
-
-                inv_out = await inv_svc.infer()
-                cap_out = await cap_svc.infer()
-
-                # RCCP validation
-                cap_out = await cap_svc.validate_rccp(cap_out)
-
-                # Joint optimization
-                joint_result = await joint_inventory_capacity_optimization(
-                    config_id=config_id,
-                    inventory_output=inv_out,
-                    capacity_output=cap_out,
-                )
-                result["joint_optimization_sites"] = len(joint_result)
-                result["rccp_overloaded"] = sum(
-                    len(v) for v in cap_out.rccp_overloaded_resources.values()
-                )
-        except Exception as e:
-            logger.warning(
-                "Joint inventory-capacity optimization skipped for config %d: %s",
-                config_id, e,
-            )
-            result["joint_optimization_sites"] = 0
-
-        return result
+    # PR-5.E (2026-05-05) — _step_demand_tgnn / _step_supply_tgnn /
+    # _step_inventory_tgnn / _step_capacity_tgnn deleted along with
+    # the SCP-shape Powell GNN services. ConfigProvisioningStatus.STEPS
+    # (defined in azirella_data_model.governance) still lists these
+    # keys; ProvisioningService._execute_step gracefully returns a
+    # placeholder result when no _step_<key> handler exists, so the
+    # provisioning loop continues without these training steps. Core's
+    # registry will drop them in a follow-up §1.13 round.
 
     async def _step_trm_load_pretrained(self, config_id: int) -> dict:
         """Load pre-trained TMS TRM checkpoints from disk.
@@ -2693,21 +2592,8 @@ class ProvisioningService:
             "duration_seconds": result.duration_seconds,
         }
 
-    async def _step_demand_tgnn_bg(self, config_id: int, db: AsyncSession) -> dict:
-        """Step 5 background: Train Demand Planning tGNN (delegates to foreground handler)."""
-        return await self._step_demand_tgnn(config_id, db=db)
-
-    async def _step_supply_tgnn_bg(self, config_id: int, db: AsyncSession) -> dict:
-        """Step 6 background: Train Supply Planning tGNN (delegates to foreground handler)."""
-        return await self._step_supply_tgnn(config_id, db=db)
-
-    async def _step_inventory_tgnn_bg(self, config_id: int, db: AsyncSession) -> dict:
-        """Step 7 background: Train Inventory Optimization tGNN (delegates to foreground handler)."""
-        return await self._step_inventory_tgnn(config_id, db=db)
-
-    async def _step_capacity_tgnn_bg(self, config_id: int, db: AsyncSession) -> dict:
-        """Step 8 background: Train Capacity/RCCP tGNN (delegates to foreground handler)."""
-        return await self._step_capacity_tgnn(config_id, db=db)
+    # _step_*_tgnn_bg variants deleted in PR-5.E along with the
+    # foreground handlers. See note above _step_trm_load_pretrained.
 
     async def _step_trm_load_pretrained_bg(self, config_id: int, db: AsyncSession) -> dict:
         """Background: load pretrained TMS TRM checkpoints (delegates to foreground handler)."""
