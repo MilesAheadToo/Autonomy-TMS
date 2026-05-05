@@ -51,6 +51,10 @@ def test_estimate_lane_eta_with_explicit_coords() -> None:
     _assert_markers(response, "transport.lane.estimate_eta")
     assert response["p50_days"] >= 1.0
     assert response["p10_days"] < response["p50_days"] < response["p90_days"]
+    # Queue #4 — the inner ConformalBand also stamps HEURISTIC, not STUB.
+    # The four-place warning regime carries HEURISTIC on the outer
+    # payload; the band on the wire-format ConformalBand must agree.
+    assert response["eta_band"]["producer_tier"] == "HEURISTIC"
 
 
 def test_estimate_lane_eta_missing_required_raises() -> None:

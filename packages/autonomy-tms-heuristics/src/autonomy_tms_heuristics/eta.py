@@ -77,17 +77,26 @@ class ETAResult:
     resolution_path: str
 
     def as_band(self, *, producer_signature: str) -> ConformalBand:
-        """Wrap as ConformalBand. ``ProducerTier.STUB`` is the legacy enum
-        value preserved for back-compat with TRMs that pattern-match on it;
-        the response payload separately carries ``producer_tier="HEURISTIC"``
-        per the four-place warning regime."""
+        """Wrap as :class:`ConformalBand` stamped with
+        ``ProducerTier.HEURISTIC``.
+
+        Pre-§3.48 Phase 5 this stamped ``ProducerTier.STUB`` for
+        back-compat with consumer code that pattern-matched the legacy
+        enum. As of 2026-05-04 (msi-stealth queue #4) Phase 5 deleted
+        the legacy stub packages from Core, and an audit confirmed
+        zero TMS consumers pattern-match ``ProducerTier.STUB`` on a
+        :class:`ConformalBand`. ``STUB`` remains in the enum as a
+        documented alias of ``HEURISTIC`` (read-side back-compat for
+        any older persisted band rows) but every new write uses
+        ``HEURISTIC``.
+        """
         return ConformalBand(
             p10=float(self.p10_days),
             p50=float(self.p50_days),
             p90=float(self.p90_days),
             coverage_target=0.95,
             producer_signature=producer_signature,
-            producer_tier=ProducerTier.STUB,
+            producer_tier=ProducerTier.HEURISTIC,
         )
 
     def as_dict(self) -> Dict[str, Any]:
