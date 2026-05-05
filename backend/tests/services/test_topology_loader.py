@@ -29,38 +29,77 @@ _LOADER_PATH = os.path.join(
 
 
 def _load_topology_loader_module():
+    """Load topology_loader.py without triggering app.services.__init__.
+
+    Snapshots sys.modules before installing fake stub packages, exec's
+    the module, then restores sys.modules to its pre-call state. The
+    returned module object stays alive (loader_module references it)
+    and topology_loader's imports are bound to names in its own
+    namespace, so post-restore sys.modules cleanliness doesn't break
+    anything.
+
+    This avoids the pollution that earlier revisions caused in
+    cross-module test runs (this file's stubs leaked into
+    test_tms_agent_card.py via the shared ``app.*`` path namespace).
+    """
     # Stub out the model imports the loader pulls in. We don't exercise
     # the async load path here — only the pure helpers and dataclass
     # shape — so type-only stubs are sufficient.
-    if "app" not in sys.modules:
-        for parent in ("app", "app.models", "app.services"):
-            pkg = types.ModuleType(parent)
-            pkg.__path__ = []
-            sys.modules[parent] = pkg
-
-    if "app.models.supply_chain_config" not in sys.modules:
-        scc = types.ModuleType("app.models.supply_chain_config")
-
-        class _StubBase:  # noqa: D401 — type-only stub
-            pass
-
-        scc.SupplyChainConfig = type("SupplyChainConfig", (_StubBase,), {})
-        scc.Node = type("Node", (_StubBase,), {})
-        scc.TransportationLane = type("TransportationLane", (_StubBase,), {})
-        sys.modules["app.models.supply_chain_config"] = scc
-
-    if "app.models.sc_entities" not in sys.modules:
-        sce = types.ModuleType("app.models.sc_entities")
-        sce.Product = type("Product", (object,), {})
-        sys.modules["app.models.sc_entities"] = sce
-
-    spec = importlib.util.spec_from_file_location(
-        "topology_loader_test_loaded", _LOADER_PATH,
+    keys_we_might_install = (
+        "app",
+        "app.models",
+        "app.services",
+        "app.models.supply_chain_config",
+        "app.models.sc_entities",
+        "topology_loader_test_loaded",
     )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    snapshot = {k: sys.modules.get(k, _SENTINEL) for k in keys_we_might_install}
+
+    try:
+        if "app" not in sys.modules:
+            for parent in ("app", "app.models", "app.services"):
+                pkg = types.ModuleType(parent)
+                pkg.__path__ = []
+                sys.modules[parent] = pkg
+
+        if "app.models.supply_chain_config" not in sys.modules:
+            scc = types.ModuleType("app.models.supply_chain_config")
+
+            class _StubBase:  # noqa: D401 — type-only stub
+                pass
+
+            scc.SupplyChainConfig = type("SupplyChainConfig", (_StubBase,), {})
+            scc.Node = type("Node", (_StubBase,), {})
+            scc.TransportationLane = type("TransportationLane", (_StubBase,), {})
+            sys.modules["app.models.supply_chain_config"] = scc
+
+        if "app.models.sc_entities" not in sys.modules:
+            sce = types.ModuleType("app.models.sc_entities")
+            sce.Product = type("Product", (object,), {})
+            sys.modules["app.models.sc_entities"] = sce
+
+        spec = importlib.util.spec_from_file_location(
+            "topology_loader_test_loaded", _LOADER_PATH,
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        # Restore sys.modules to its pre-call state — keeps test
+        # isolation. The loaded module object stays alive via the
+        # caller's reference; topology_loader binds its imports
+        # (Product, SupplyChainConfig, etc.) to names in its own
+        # namespace at exec_module time, so subsequent attribute
+        # access on those names doesn't consult sys.modules.
+        for key, prev in snapshot.items():
+            if prev is _SENTINEL:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = prev
+
+
+_SENTINEL = object()
 
 
 loader_module = _load_topology_loader_module()
