@@ -561,7 +561,7 @@ const DecisionProposalManager = ({ configId, scenarioName, onProposalChange }) =
                           <TableRow>
                             <TableHead>Metric</TableHead>
                             <TableHead className="text-right">P10</TableHead>
-                            <TableHead className="text-right">P50</TableHead>
+                            <TableHead className="text-right">Median</TableHead>
                             <TableHead className="text-right">P90</TableHead>
                           </TableRow>
                         </TableHeader>
@@ -599,7 +599,7 @@ const DecisionProposalManager = ({ configId, scenarioName, onProposalChange }) =
                           <TableRow>
                             <TableHead>Metric</TableHead>
                             <TableHead className="text-right">P10</TableHead>
-                            <TableHead className="text-right">P50</TableHead>
+                            <TableHead className="text-right">Median</TableHead>
                             <TableHead className="text-right">P90</TableHead>
                           </TableRow>
                         </TableHeader>

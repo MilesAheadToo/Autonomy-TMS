@@ -94,7 +94,7 @@ const ATPHistoryChart = ({
               <span className="font-semibold">{data.atp_p90} units</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span className="text-primary">P50 (Median):</span>
+              <span className="text-primary">Median:</span>
               <span className="font-semibold">{data.atp_p50} units</span>
             </div>
             <div className="flex justify-between gap-4">
@@ -137,7 +137,7 @@ const ATPHistoryChart = ({
               <span className="font-semibold">{data.ctp_p90} units</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span className="text-primary">P50 (Median):</span>
+              <span className="text-primary">Median:</span>
               <span className="font-semibold">{data.ctp_p50} units</span>
             </div>
             <div className="flex justify-between gap-4">
@@ -334,7 +334,7 @@ const ATPHistoryChart = ({
                     stroke="hsl(var(--primary))"
                     strokeWidth={3}
                     dot={{ fill: 'hsl(var(--primary))', r: 4 }}
-                    name="P50 Median"
+                    name="Median"
                   />
 
                   {/* Zero line */}
@@ -390,7 +390,7 @@ const ATPHistoryChart = ({
                     stroke="hsl(var(--primary))"
                     strokeWidth={3}
                     dot={{ fill: 'hsl(var(--primary))', r: 4 }}
-                    name="P50 Median"
+                    name="Median"
                   />
 
                   {/* Capacity line */}
@@ -503,7 +503,7 @@ const ATPHistoryChart = ({
             <p className="text-xs text-muted-foreground">
               <strong className="text-emerald-600">P90</strong>: 90% probability ATP/CTP will be at or below this value
               <br />
-              <strong className="text-primary">P50</strong>: Median expected value (most likely outcome)
+              <strong className="text-primary">Median</strong>: Most likely outcome (50th percentile of the predictive distribution)
               <br />
               <strong className="text-amber-600">P10</strong>: 10% probability ATP/CTP will be at or below this value
             </p>

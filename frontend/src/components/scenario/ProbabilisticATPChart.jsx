@@ -96,7 +96,7 @@ const ProbabilisticATPChart = ({
               <span className="font-semibold text-emerald-600">{data?.atp_p90} units</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span className="text-muted-foreground">P50 (Median):</span>
+              <span className="text-muted-foreground">Median:</span>
               <span className="font-semibold text-primary">{data?.atp_p50} units</span>
             </div>
             <div className="flex justify-between gap-4">
@@ -320,7 +320,7 @@ const ProbabilisticATPChart = ({
                   stroke="hsl(var(--primary))"
                   strokeWidth={2}
                   fill="rgba(59, 130, 246, 0.3)"
-                  name="P50 (Median)"
+                  name="Median"
                 />
                 <Area
                   type="monotone"
@@ -372,7 +372,7 @@ const ProbabilisticATPChart = ({
             <p className="text-xs text-muted-foreground">
               <strong className="text-emerald-600">P90</strong>: 90% probability ATP will be at or below this value (optimistic scenario)
               <br />
-              <strong className="text-primary">P50</strong>: Median expected ATP (most likely outcome)
+              <strong className="text-primary">Median</strong>: Most likely ATP (50th percentile of the predictive distribution)
               <br />
               <strong className="text-amber-600">P10</strong>: 10% probability ATP will be at or below this value (pessimistic scenario)
             </p>

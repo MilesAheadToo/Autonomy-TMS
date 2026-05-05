@@ -112,7 +112,7 @@ const ProbabilisticPipelineChart = ({
               <span className="font-semibold text-amber-600">Round {data.arrival_p10_round}</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span className="text-muted-foreground">P50 Arrival:</span>
+              <span className="text-muted-foreground">Median Arrival:</span>
               <span className="font-semibold text-primary">Round {data.arrival_p50_round}</span>
             </div>
             <div className="flex justify-between gap-4">
@@ -235,7 +235,7 @@ const ProbabilisticPipelineChart = ({
             </Card>
             <Card className="bg-primary/10">
               <CardContent className="pt-3 pb-2 text-center">
-                <p className="text-xs text-primary">P50</p>
+                <p className="text-xs text-primary">Median</p>
                 <p className="text-lg font-bold text-primary">
                   {lead_time_stats?.p50 || 'N/A'}
                 </p>
@@ -353,7 +353,7 @@ const ProbabilisticPipelineChart = ({
                     />
                     <Bar
                       dataKey="p50"
-                      name="P50 (Median)"
+                      name="Median"
                       fill="#3b82f6"
                     />
                     <Bar
@@ -383,7 +383,7 @@ const ProbabilisticPipelineChart = ({
             <p className="text-xs text-muted-foreground">
               <strong className="text-amber-600">P10</strong>: 10% probability arrival will be at or before this round (earliest)
               <br />
-              <strong className="text-primary">P50</strong>: Median expected arrival round
+              <strong className="text-primary">Median</strong>: Most likely arrival round (50th percentile)
               <br />
               <strong className="text-emerald-600">P90</strong>: 90% probability arrival will be at or before this round (latest)
             </p>

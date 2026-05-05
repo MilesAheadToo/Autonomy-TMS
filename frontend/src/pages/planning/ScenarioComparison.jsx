@@ -133,7 +133,7 @@ export default function ScenarioComparison() {
                 <YAxis tick={{ fontSize: 10 }} />
                 <Tooltip contentStyle={{ fontSize: 11 }} />
                 <Legend wrapperStyle={{ fontSize: 10 }} />
-                <Bar dataKey="p50" fill="#6366f1" fillOpacity={0.3} name="Plan of Record (P50)" />
+                <Bar dataKey="p50" fill="#6366f1" fillOpacity={0.3} name="Plan of Record (Median)" />
                 {series[0]?.actual != null && (
                   <Line type="monotone" dataKey="actual" stroke="#ef4444" strokeWidth={2} name="Actual Demand" dot={{ r: 2 }} />
                 )}

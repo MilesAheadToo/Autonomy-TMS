@@ -587,10 +587,10 @@ const DemandPlanView = () => {
                   fill="#ffffff" fillOpacity={1} name="P10 (Low)"
                   dot={false} activeDot={false}
                 />
-                {/* P50 forecast line */}
+                {/* Median forecast line */}
                 <Line
                   type="monotone" dataKey="p50" stroke="#6366f1"
-                  strokeWidth={2.5} name="Forecast (P50)" dot={false}
+                  strokeWidth={2.5} name="Forecast (Median)" dot={false}
                 />
                 {/* P10/P90 boundary lines */}
                 <Line
@@ -778,7 +778,7 @@ const DemandPlanView = () => {
                 <TableHead>Site ID</TableHead>
                 <TableHead>Forecast Date</TableHead>
                 <TableHead className="text-right">P10 (Low)</TableHead>
-                <TableHead className="text-right">P50 (Most Likely)</TableHead>
+                <TableHead className="text-right">Median (Most Likely)</TableHead>
                 <TableHead className="text-right">Forecast Median</TableHead>
                 <TableHead className="text-right">P90 (High)</TableHead>
                 <TableHead className="text-center">Confidence</TableHead>
@@ -962,8 +962,8 @@ const DemandPlanView = () => {
                   <TableHead>Product</TableHead>
                   <TableHead>Site</TableHead>
                   <TableHead>Date</TableHead>
-                  <TableHead className="text-right">Previous (P50)</TableHead>
-                  <TableHead className="text-right">Current (P50)</TableHead>
+                  <TableHead className="text-right">Previous (Median)</TableHead>
+                  <TableHead className="text-right">Current (Median)</TableHead>
                   <TableHead className="text-right">Previous (Median)</TableHead>
                   <TableHead className="text-right">Current (Median)</TableHead>
                   <TableHead className="text-right">Delta</TableHead>
@@ -1057,7 +1057,7 @@ const DemandPlanView = () => {
                   />
                 </div>
                 <div>
-                  <Label>P50 (Most Likely)</Label>
+                  <Label>Median (Most Likely)</Label>
                   <Input
                     type="number"
                     value={editValues.p50}

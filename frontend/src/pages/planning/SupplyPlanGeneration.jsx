@@ -224,7 +224,7 @@ export default function SupplyPlanGeneration() {
                     <Legend wrapperStyle={{ fontSize: 10 }} />
                     <Area type="monotone" dataKey="p90" stroke="none" fill="#8884d8" fillOpacity={0.12} name="P90 (High)" />
                     <Area type="monotone" dataKey="p10" stroke="none" fill="#ffffff" fillOpacity={1} name="P10 (Low)" />
-                    <Line type="monotone" dataKey="p50" stroke="#6366f1" strokeWidth={2.5} name="Plan of Record (P50)" dot={false} />
+                    <Line type="monotone" dataKey="p50" stroke="#6366f1" strokeWidth={2.5} name="Plan of Record (Median)" dot={false} />
                     <Line type="monotone" dataKey="p10" stroke="#86efac" strokeWidth={1} strokeDasharray="4 3" name="P10" dot={false} />
                     <Line type="monotone" dataKey="p90" stroke="#fbbf24" strokeWidth={1} strokeDasharray="4 3" name="P90" dot={false} />
                     {series[0]?.actual != null && (
@@ -246,7 +246,7 @@ export default function SupplyPlanGeneration() {
                       <TableRow>
                         <TableHead className="sticky left-0 bg-white">Period</TableHead>
                         <TableHead className="text-right">P10</TableHead>
-                        <TableHead className="text-right font-bold">P50 (Plan)</TableHead>
+                        <TableHead className="text-right font-bold">Median (Plan)</TableHead>
                         <TableHead className="text-right">P90</TableHead>
                         <TableHead className="text-right">Actual</TableHead>
                         <TableHead className="text-right">Products</TableHead>

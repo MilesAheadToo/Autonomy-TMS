@@ -922,7 +922,7 @@ const DemandPlanEdit = () => {
       URL.revokeObjectURL(url);
     } catch {
       // Fallback: export current page data as CSV
-      const rows = [['Product', 'Site', 'Date', 'P10', 'P50', 'P90', 'Granularity']];
+      const rows = [['Product', 'Site', 'Date', 'P10', 'Median', 'P90', 'Granularity']];
       rows.push(['Note: Connect to API for full export']);
       const blob = new Blob([rows.map((r) => r.join(',')).join('\n')], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
