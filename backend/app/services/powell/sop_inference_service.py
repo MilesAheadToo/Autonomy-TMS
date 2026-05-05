@@ -236,9 +236,9 @@ class SOPInferenceService:
     # ── Private Methods ──
 
     async def _load_topology(self):
-        """Load topology using dag_simulator's load_topology."""
+        """Load topology using topology_loader's load_topology."""
         try:
-            from app.services.dag_simulator import load_topology
+            from app.services.topology_loader import load_topology
             return await load_topology(self.config_id, self.db)
         except Exception as e:
             logger.error(f"Failed to load topology for config {self.config_id}: {e}")
@@ -295,8 +295,16 @@ class SOPInferenceService:
             # Cost
             unit_cost = getattr(site, 'holding_cost', None) or 1.0
 
-            # Reliability from vendor data
-            reliability = topology.vendor_reliability.get(name, 0.95)
+            # Reliability — pre-PR-5.D the legacy ``LoadedTopology``
+            # carried a per-vendor ``vendor_reliability`` map populated
+            # from ``_load_vendor_info``. The loader hard-coded every
+            # value to 0.95 (the default), so the field was constant
+            # data, not real reliability. PR-5.D dropped the inventory-
+            # field loaders; this caller now uses the constant
+            # directly. When real per-vendor reliability becomes
+            # available (e.g. via TradingPartner.reliability_pct),
+            # replace this constant with the lookup.
+            reliability = 0.95
 
             # Connectivity
             num_suppliers = len(topology.upstream_map.get(name, []))
