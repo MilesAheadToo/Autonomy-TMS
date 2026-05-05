@@ -93,16 +93,15 @@ def register_relearning_jobs(scheduler_service: 'SyncSchedulerService') -> None:
     )
     logger.info("Registered Powell causal matching job (daily at 02:40)")
 
-    # Daily at 03:00: GNN orchestration cycle (S&OP + Execution → directive broadcast)
-    scheduler.add_job(
-        func=_run_gnn_orchestration,
-        trigger=CronTrigger(hour=3, minute=0),
-        id="powell_gnn_orchestration",
-        name="Powell: GNN Orchestration Cycle (daily)",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    logger.info("Registered Powell GNN orchestration job (daily at 03:00)")
+    # PR-5.E (2026-05-05) — daily GNN orchestration cron disabled.
+    # The cycle's tactical phase relied on TacticalHiveCoordinator and
+    # the 4 SCP-shape tactical tGNN services that PR-5.E deleted; the
+    # remaining S&OP-only phase produces directives no TMS plane code
+    # consumes. Re-enable when §1.13 / §3.41 land TMS-shape tactical
+    # tier services in Core and the broadcast has live consumers.
+    # The orchestration function (_run_gnn_orchestration) is still
+    # imported below so the manual REST trigger remains callable for
+    # forensic / development use.
 
     # Hourly: Skill outcome collection — decision_embeddings (at :33)
     scheduler.add_job(
