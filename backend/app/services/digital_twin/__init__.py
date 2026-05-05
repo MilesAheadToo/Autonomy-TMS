@@ -11,7 +11,6 @@ is split into:
 
 PR-1 is scaffolding — interfaces and dataclasses, no physics yet. PR-2
 fills in the parametric shipment generator; PR-3 fills in the simulator.
-The legacy dag_simpy_simulator.py is unchanged and still in use.
 """
 from __future__ import annotations
 
