@@ -61,12 +61,15 @@ def _equipment() -> dict[str, EquipmentProfile]:
     }
 
 
-def _lane_params(initial_equipment: int = 20) -> LanePhysicsParams:
+def _lane_params(
+    initial_equipment: int = 20,
+    transit_buckets: int = 1,
+) -> LanePhysicsParams:
     return LanePhysicsParams(
         origin_site_id="site:1",
         destination_site_id="site:2",
         product_id="sku:A",
-        transit_buckets=1,
+        transit_buckets=transit_buckets,
         initial_equipment=initial_equipment,
         dock_capacity_per_bucket=20,
         carriers=_carriers(),
@@ -212,13 +215,24 @@ def test_attached_model_distinguishes_tender_vs_capacity_rejects():
 
 def test_attached_model_equipment_only_consumed_by_accepted_loads():
     """When the model rejects a tender, equipment is NOT consumed
-    (the load was never dispatched)."""
+    (the load was never dispatched).
+
+    Uses ``transit_buckets=2`` deliberately: at ``transit_buckets=1`` a
+    load dispatched in step ``t`` arrives in step ``t+1`` *within the
+    same step() call* (the simulator does dispatch then arrive-resolve
+    sequentially), so equipment leaves and returns inside one step and
+    the post-step ``equipment_available`` always equals the initial
+    pool — masking whether rejected loads consumed it. With
+    ``transit_buckets=2`` the dispatched loads are still in flight at
+    the post-step observation, so the assertion measures what it
+    means to.
+    """
     events: list[OutcomeEvent] = []
     model = CarrierAcceptanceModel(CarrierAcceptanceParams())
     sim = LaneFlowSimulator(
         generator=_generator(),
         tenant_id=1, config_id=1,
-        lane_params=_lane_params(initial_equipment=20),
+        lane_params=_lane_params(initial_equipment=20, transit_buckets=2),
         tier=Tier.TACTICAL,
         horizon_buckets=4,
         mode=TwinMode.TRAINING,
@@ -244,6 +258,16 @@ def test_attached_model_equipment_only_consumed_by_accepted_loads():
     assert obs.equipment_available == expected_equipment, (
         f"equipment expected {expected_equipment} (initial 20 minus "
         f"{accepted_count} accepted), got {obs.equipment_available}"
+    )
+    # Rejected loads also produced tender_declined events, which is
+    # what the model is supposed to do. Co-asserting here so the test
+    # documents the full reject path.
+    declined_count = sum(
+        1 for e in events if e.outcome_kind == "tender_declined"
+    )
+    assert declined_count > 0, (
+        "expected at least one tender_declined event under "
+        "scenario_market_tightness=0.5 + spot carrier"
     )
 
 
