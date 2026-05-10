@@ -748,6 +748,42 @@ class ProvisioningService:
         row = result.fetchone()
         tenant_id = row.tenant_id if row else 0
 
+        # PR-6 follow-up — Phase-2 shipment-generator calibration. Mirrors
+        # SCP's seasonal-envelope fit at the same point in the pipeline:
+        # fit + persist tenant-calibrated SeasonalEnvelopes from historical
+        # TransferOrder + TransferOrderLineItem rows so any twin-driven
+        # simulation augmentation downstream uses the fitted shipment shape
+        # instead of bootstrap defaults. Best-effort — a fit failure logs a
+        # warning and falls back to the parametric Phase-1 generator.
+        phase2_summary = None
+        try:
+            from app.db.session import sync_session_factory
+            from app.services.digital_twin.phase2_fitter import (
+                fit_phase2_for_config,
+            )
+            sync_db = sync_session_factory()
+            try:
+                phase2_summary = fit_phase2_for_config(
+                    db=sync_db,
+                    config_id=config_id,
+                    tenant_id=tenant_id,
+                )
+                sync_db.commit()
+                logger.info(
+                    "Phase-2 shipment-generator calibration "
+                    "(config=%d, tenant=%d): %s",
+                    config_id, tenant_id, phase2_summary,
+                )
+            finally:
+                sync_db.close()
+        except Exception as exc:  # noqa: BLE001 — best-effort calibration
+            logger.warning(
+                "Phase-2 shipment-generator calibration failed for "
+                "config=%d (twin will fall back to bootstrap "
+                "shipment generator): %s",
+                config_id, exc,
+            )
+
         # Stream 1: historical extraction (primary source of BC labels)
         hist = await HistoricalExtractionOrchestrator(effective_db).extract_all(
             tenant_id=tenant_id, config_id=config_id,
@@ -795,6 +831,7 @@ class ProvisioningService:
             },
             "thin_trms": thin_trms,
             "simulation": sim_summary,
+            "phase2_shipment_calibration": phase2_summary,
         }
 
     async def _step_sop_graphsage(self, config_id: int) -> dict:

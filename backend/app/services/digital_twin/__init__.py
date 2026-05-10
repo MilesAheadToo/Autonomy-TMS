@@ -31,8 +31,11 @@ from .phase2_fitter import (
     PHASE2_TENANT_CALIBRATED_PRODUCER_SIGNATURE,
     FitParameters,
     HistoricalShipment,
+    fit_phase2_for_config,
     fit_phase2_shipment_generator,
     load_history_for_config,
+    load_history_for_config_sync,
+    load_phase2_generator_for_config,
 )
 from .shipment_generator import (
     PARAMETRIC_STUB_PRODUCER_SIGNATURE,
@@ -59,7 +62,10 @@ __all__ = [
     "Phase1ShipmentGenerator",
     "RewardFn",
     "ShipmentGenerator",
+    "fit_phase2_for_config",
     "fit_phase2_shipment_generator",
     "lane_series_key",
     "load_history_for_config",
+    "load_history_for_config_sync",
+    "load_phase2_generator_for_config",
 ]

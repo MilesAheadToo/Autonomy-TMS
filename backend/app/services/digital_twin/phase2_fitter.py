@@ -8,6 +8,25 @@ fit per-channel and per-lane parameters from it, and return a
 ``Phase1ShipmentGenerator`` configured with those fitted values
 instead of bootstrap defaults.
 
+The module is split into three layers:
+
+1. **Pure fitter** (``fit_phase2_shipment_generator``) — runs against
+   any ``Iterable[HistoricalShipment]``. Pure function, deterministic
+   given the same input. Tested against synthetic data.
+2. **DB loaders** (``load_history_for_config`` async,
+   ``load_history_for_config_sync`` sync) — thin adapters that read
+   ``TransferOrder`` + ``TransferOrderLineItem`` rows for a config
+   and map them to ``HistoricalShipment``. Two flavours so both
+   async and sync provisioning paths can use the same fitter.
+3. **Provisioning helpers** (``fit_phase2_for_config``,
+   ``load_phase2_generator_for_config``) — sync functions for the
+   ``_step_training_corpus`` provisioning hook. ``fit_phase2_for_config``
+   fits + persists the seasonal envelopes via
+   ``SeasonalEnvelopeRecord``; ``load_phase2_generator_for_config``
+   reverses that — re-walks history, reads persisted envelopes, and
+   returns a fully-configured generator (mirrors SCP's
+   ``load_envelopes_for_simulator``).
+
 The fit pulls four parameter classes out of the same history walk:
 
 1. **Channel discovery.** ``candidate_lanes``,
@@ -420,10 +439,251 @@ async def load_history_for_config(
     return out
 
 
+def load_history_for_config_sync(
+    db,  # SQLAlchemy Session — typed as Any so this module imports clean
+    config_id: int,
+    *,
+    history_window_days: int = 365 * 2,
+    end_date: date | None = None,
+) -> list[HistoricalShipment]:
+    """Sync version of ``load_history_for_config``.
+
+    Provisioning steps run inside async handlers but open *sync*
+    SQLAlchemy sessions for SQL-heavy work (see SCP's
+    ``_step_training_corpus`` and TMS's ``_step_warm_start``,
+    ``_step_lgbm_forecast``). This sync loader is the entry point those
+    sync sessions use.
+    """
+    from sqlalchemy import select
+    from app.models.transfer_order import TransferOrder, TransferOrderLineItem
+
+    cutoff = (end_date or date.today()) - timedelta(days=history_window_days)
+
+    stmt = (
+        select(
+            TransferOrder.source_site_id,
+            TransferOrder.destination_site_id,
+            TransferOrder.shipment_date,
+            TransferOrderLineItem.product_id,
+            TransferOrderLineItem.quantity,
+        )
+        .join(
+            TransferOrderLineItem,
+            TransferOrderLineItem.to_id == TransferOrder.id,
+        )
+        .where(TransferOrder.config_id == config_id)
+        .where(TransferOrder.shipment_date >= cutoff)
+    )
+    rows = db.execute(stmt).all()
+
+    out: list[HistoricalShipment] = []
+    for row in rows:
+        origin_id, dest_id, ship_date, product_id, qty = row
+        if ship_date is None:
+            continue
+        out.append(
+            HistoricalShipment(
+                origin_site_id=f"site:{int(origin_id)}",
+                destination_site_id=f"site:{int(dest_id)}",
+                product_id=str(product_id),
+                shipment_date=ship_date,
+                quantity=float(qty or 0.0),
+                unit="each",
+            )
+        )
+    return out
+
+
+# ── Provisioning helpers (SCP-mirror pattern) ────────────────────────
+
+
+def fit_phase2_for_config(
+    *,
+    db,  # SQLAlchemy Session
+    config_id: int,
+    tenant_id: int,
+    history_window_days: int = 365 * 2,
+    params: FitParameters | None = None,
+    history_loader=None,
+) -> dict[str, int]:
+    """Fit + persist Phase-2 seasonal envelopes for ``config_id``.
+
+    Mirrors SCP's ``fit_seasonal_envelopes_for_config`` pattern. Walks
+    tenant TO history, runs the pure fitter, and **persists** the
+    fitted seasonal envelopes via Core's ``SeasonalEnvelopeRecord``
+    upsert. The lighter parameters (``base_volumes``,
+    ``candidate_lanes``, etc.) are deliberately **not** persisted —
+    SCP's pattern stores only the heavy artefact and recomputes the
+    rest at simulator-instantiation time. ``load_phase2_generator_for_config``
+    is the matching reader.
+
+    Idempotent: upsert-on-``(tenant_id, series_kind, series_key)``.
+    Best-effort: callers should wrap in try/except so a fit failure
+    doesn't fail the whole provisioning step (mirrors SCP).
+
+    Args:
+        db: sync SQLAlchemy session.
+        config_id: which supply-chain config to process.
+        tenant_id: tenant scope. Required for RLS-policy compliance and
+            for the unique key on ``stochastic_seasonal_envelope``.
+        history_window_days: how far back to look for shipments.
+        params: optional fit-knob overrides.
+        history_loader: optional injection point for tests. Defaults to
+            ``load_history_for_config_sync``.
+
+    Returns:
+        Summary dict ``{n_lanes, n_envelopes_fitted, n_lanes_skipped,
+        n_channels_with_base_volume, n_products}`` for the
+        provisioning-step result payload.
+    """
+    from azirella_data_model.stochastic.orm import SeasonalEnvelopeRecord
+
+    loader = history_loader or load_history_for_config_sync
+    history = loader(db, config_id, history_window_days=history_window_days)
+
+    if not history:
+        logger.info(
+            "fit_phase2_for_config: no shipment history for config=%d", config_id
+        )
+        return {
+            "n_lanes": 0,
+            "n_envelopes_fitted": 0,
+            "n_lanes_skipped": 0,
+            "n_channels_with_base_volume": 0,
+            "n_products": 0,
+        }
+
+    generator = fit_phase2_shipment_generator(history, params=params)
+
+    # Persist seasonal envelopes via the same ORM table SCP uses.
+    n_fitted = 0
+    for series_key, envelope in generator.seasonal_envelopes.items():
+        existing = (
+            db.query(SeasonalEnvelopeRecord)
+            .filter(
+                SeasonalEnvelopeRecord.tenant_id == tenant_id,
+                SeasonalEnvelopeRecord.series_kind == envelope.series_kind,
+                SeasonalEnvelopeRecord.series_key == series_key,
+            )
+            .one_or_none()
+        )
+        if existing is None:
+            record = SeasonalEnvelopeRecord(
+                tenant_id=tenant_id,
+                config_id=config_id,
+                series_kind=envelope.series_kind,
+                series_key=series_key,
+                period=envelope.period,
+                period_indices=envelope.period_indices,
+                p_low=envelope.p_low,
+                p_mid=envelope.p_mid,
+                p_high=envelope.p_high,
+                residual_distribution=envelope.residual_distribution.to_dict(),
+                fit_metadata=envelope.fit_metadata.to_dict(),
+            )
+            db.add(record)
+        else:
+            existing.config_id = config_id
+            existing.period = envelope.period
+            existing.period_indices = envelope.period_indices
+            existing.p_low = envelope.p_low
+            existing.p_mid = envelope.p_mid
+            existing.p_high = envelope.p_high
+            existing.residual_distribution = envelope.residual_distribution.to_dict()
+            existing.fit_metadata = envelope.fit_metadata.to_dict()
+        n_fitted += 1
+
+    # Caller commits — keeps fit_phase2_for_config composable inside a
+    # broader provisioning transaction (mirrors
+    # SeasonalEnvelopeFitPipeline.fit_for_tenant).
+
+    summary = {
+        "n_lanes": len(generator.candidate_lanes),
+        "n_envelopes_fitted": n_fitted,
+        "n_lanes_skipped": len(generator.candidate_lanes) - n_fitted,
+        "n_channels_with_base_volume": len(generator.base_volumes),
+        "n_products": len(generator.candidate_products),
+    }
+    logger.info(
+        "fit_phase2_for_config(config=%d, tenant=%d): %s",
+        config_id, tenant_id, summary,
+    )
+    return summary
+
+
+def load_phase2_generator_for_config(
+    *,
+    db,  # SQLAlchemy Session
+    tenant_id: int,
+    config_id: int,
+    history_window_days: int = 365 * 2,
+    params: FitParameters | None = None,
+    history_loader=None,
+) -> Phase1ShipmentGenerator:
+    """Load tenant-calibrated Phase-2 generator for ``config_id``.
+
+    Mirrors SCP's ``load_envelopes_for_simulator`` pattern: re-walks
+    history to discover channels and recompute base_volumes /
+    product_unit_overrides (cheap), then **overrides** the fitter's
+    ad-hoc envelopes with persisted ones from
+    ``stochastic_seasonal_envelope`` (the canonical fitted artefact).
+
+    When no envelopes are persisted yet (Phase-2 fit hasn't run), the
+    fitter's own envelope output is preserved — equivalent to running
+    ``fit_phase2_shipment_generator`` directly.
+
+    Returns an empty Phase-2 generator if there's no history.
+    """
+    from azirella_data_model.stochastic import (
+        SeasonalEnvelopeRepository,
+        SeriesKind,
+    )
+
+    loader = history_loader or load_history_for_config_sync
+    history = loader(db, config_id, history_window_days=history_window_days)
+
+    if not history:
+        return Phase1ShipmentGenerator(
+            producer_signature=PHASE2_TENANT_CALIBRATED_PRODUCER_SIGNATURE,
+            seed=(params or FitParameters()).seed,
+        )
+
+    fresh = fit_phase2_shipment_generator(history, params=params)
+
+    repo = SeasonalEnvelopeRepository(db)
+    persisted_envs = repo.list_for_tenant(
+        tenant_id=tenant_id, series_kind=SeriesKind.OTHER.value,
+    )
+    persisted = {
+        env.series_key: env
+        for env in persisted_envs
+        if env.series_key.startswith("lane:")
+    }
+
+    merged_envelopes = dict(fresh.seasonal_envelopes)
+    merged_envelopes.update(persisted)
+
+    return Phase1ShipmentGenerator(
+        candidate_lanes=fresh.candidate_lanes,
+        candidate_products=fresh.candidate_products,
+        candidate_units=fresh.candidate_units,
+        base_volumes=fresh.base_volumes,
+        default_base_volume=(params or FitParameters()).default_base_volume,
+        seasonal_envelopes=merged_envelopes,
+        envelope_spread=fresh.envelope_spread,
+        seed=fresh.seed,
+        product_unit_overrides=fresh.product_unit_overrides,
+        producer_signature=PHASE2_TENANT_CALIBRATED_PRODUCER_SIGNATURE,
+    )
+
+
 __all__ = [
     "FitParameters",
     "HistoricalShipment",
     "PHASE2_TENANT_CALIBRATED_PRODUCER_SIGNATURE",
+    "fit_phase2_for_config",
     "fit_phase2_shipment_generator",
     "load_history_for_config",
+    "load_history_for_config_sync",
+    "load_phase2_generator_for_config",
 ]
