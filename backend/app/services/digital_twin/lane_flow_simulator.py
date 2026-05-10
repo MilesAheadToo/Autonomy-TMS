@@ -247,6 +247,8 @@ class LaneFlowSimulator:
         scenario_market_tightness: float = 0.0,
         lane_transit_model: Any = None,
         scenario_weather_index: float = 0.0,
+        dock_queue_model: Any = None,
+        scenario_appointment_type: str = "live_unload",
     ):
         self._generator = generator
         self.tenant_id = int(tenant_id)
@@ -287,6 +289,19 @@ class LaneFlowSimulator:
         # yet — feed a constant scenario weather value to the
         # LaneTransitModel. 0 = clear, 1 = severe closure-class event.
         self._scenario_weather_index = float(scenario_weather_index)
+        # PR-3.C — opt-in DockQueueModel for per-appointment dwell-time
+        # draws. ``None`` (default) keeps the simulator's existing
+        # behaviour (no dwell modelling, ``dock_queue_depth`` counter
+        # tracks unmet capacity only). When attached, each
+        # ``shipment_delivered`` event carries dwell + detention
+        # metadata so DockScheduling TRM training has a non-trivial
+        # reward signal. Until appointment_type is per-load (which
+        # requires Equipment + Site profile changes that are out of
+        # scope for PR-3.C), the simulator passes a single scenario
+        # default to the model — adjust per-tenant via
+        # ``scenario_appointment_type``.
+        self._dock_queue_model = dock_queue_model
+        self._scenario_appointment_type = str(scenario_appointment_type)
 
         if self.horizon_buckets < 1:
             raise ValueError(
@@ -355,6 +370,10 @@ class LaneFlowSimulator:
         if self._lane_transit_model is not None:
             self._lane_transit_model.reset(
                 scenario_seed=scenario_seed + 2, twin_mode=self.mode,
+            )
+        if self._dock_queue_model is not None:
+            self._dock_queue_model.reset(
+                scenario_seed=scenario_seed + 3, twin_mode=self.mode,
             )
         self._reset_called = True
 
@@ -571,20 +590,40 @@ class LaneFlowSimulator:
         # so consumers can join arrival outcomes back to the dispatch
         # tender that produced them.
         for load in arriving:
+            payload = {
+                "carrier_id": load.carrier_id,
+                "arrival_bucket": load.arrival_bucket,
+                "transportation_lane_id": lane_series_key(
+                    self.lane_params.origin_site_id,
+                    self.lane_params.destination_site_id,
+                ),
+            }
+            # PR-3.C — dock-queue dwell-time metadata. When the model
+            # is attached, draw a per-appointment dwell + detention and
+            # surface them on the delivered/late event so DockScheduling
+            # TRM training has a non-trivial reward signal.
+            if self._dock_queue_model is not None:
+                from app.services.digital_twin.physics import (
+                    AppointmentContext, AppointmentType,
+                )
+                appt_ctx = AppointmentContext(
+                    carrier_id=load.carrier_id,
+                    equipment_kind=action.equipment_kind,
+                    appointment_type=AppointmentType(self._scenario_appointment_type),
+                )
+                appt_outcome = self._dock_queue_model.step(appt_ctx)
+                payload["dwell_minutes"] = appt_outcome.dwell_minutes
+                payload["dwell_mean_minutes"] = appt_outcome.mean_minutes
+                payload["detention_minutes_over_free"] = appt_outcome.detention_minutes_over_free
+                payload["detention_cost"] = appt_outcome.detention_cost
+                payload["appointment_type"] = self._scenario_appointment_type
             self._emit_outcome(
                 decision_id=load.decision_id,
                 decision_type="load_dispatch",
                 outcome_kind=(
                     "shipment_delivered" if load.on_time else "shipment_late"
                 ),
-                payload={
-                    "carrier_id": load.carrier_id,
-                    "arrival_bucket": load.arrival_bucket,
-                    "transportation_lane_id": lane_series_key(
-                        self.lane_params.origin_site_id,
-                        self.lane_params.destination_site_id,
-                    ),
-                },
+                payload=payload,
             )
         # Equipment returns at destination — Phase 1 collapses dwell to zero,
         # so it's available again next bucket. Phase 2 layers dwell + reposition.

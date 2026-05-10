@@ -17,6 +17,13 @@ from .carrier_acceptance import (
     TenderContext,
     TenderOutcome,
 )
+from .dock_queue import (
+    AppointmentContext,
+    AppointmentOutcome,
+    AppointmentType,
+    DockQueueModel,
+    DockQueueParams,
+)
 from .intermodal_ramp import (
     IntermodalContext,
     IntermodalCostBreakdown,
@@ -41,10 +48,15 @@ from .tracking_event import (
 )
 
 __all__ = [
+    "AppointmentContext",
+    "AppointmentOutcome",
+    "AppointmentType",
     "CarrierAcceptanceModel",
     "CarrierAcceptanceParams",
     "CarrierKind",
     "CarrierTrackingTier",
+    "DockQueueModel",
+    "DockQueueParams",
     "IntermodalContext",
     "IntermodalCostBreakdown",
     "IntermodalOutcome",
