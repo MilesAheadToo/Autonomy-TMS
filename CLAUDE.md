@@ -9,6 +9,13 @@ Project rules for Claude Code. Detailed architecture in
 > carries the TMS-specific addenda. When a TMS rule conflicts with
 > Core, Core wins.
 
+> **Host roles:** TMS code dev happens on **msi-stealth** (same host the
+> runtime lives on — edit → build → restart → check loop closes there).
+> TMS training (TRM, GraphSAGE/tGNN, scenario gen) happens on
+> **acer-nitro**. Both boxes have identical RTX 4060 8GB GPUs; the
+> earlier "msi-stealth is the GPU box" framing is retired. Source of
+> truth: `../Autonomy-Core/docs/dev/MACHINE_ROLES.md`.
+
 ## On session start — check Core for pending adoptions
 
 Before proposing "what's next" or picking work, read
