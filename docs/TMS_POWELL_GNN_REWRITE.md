@@ -174,8 +174,8 @@ Six staged PRs. Each is independently mergeable.
 | Stage | Scope | Effort | Depends on |
 |---|---|---|---|
 | **GNN-1** | ~~Disable SCP-shape APScheduler cron entries; verify nothing user-facing breaks~~ **Done 2026-05-11**. Daily GNN-orchestration cron was disabled 2026-05-05 (commit in `relearning_jobs.py`); manual `/site-agent/gnn/run-cycle` REST endpoint returns HTTP 410 Gone as of this update. | — | — |
-| **GNN-2** | Strip SCP-shape provisioning steps; new tenants stop training SCP-shape models | 2 days | GNN-1 soaked 1 week |
-| **GNN-3** | Build TMS-shape **Lane Volume Forecast tGNN** + training loop + first checkpoint per tenant | 2 weeks | Substrate extraction (Core-side) at least started |
+| **GNN-2** | Strip SCP-shape provisioning steps. **Audit shipped 2026-05-11** ([GNN_2_PROVISIONING_AUDIT.md](GNN_2_PROVISIONING_AUDIT.md)) — only 2 handlers (`_step_sop_graphsage` + `_bg`) need stripping; SCP-shape `*_tgnn` keys are already no-ops via missing-handler fallback. Other "SCP-vestigial" steps (`supply_plan`, `rccp_validation`) have active TMS consumers and stay until separate rename workstreams. | 1 day (just the audited 2 handlers) | GNN-1 soaked 1 day |
+| **GNN-3** | Build TMS-shape **Lane Volume Forecast tGNN** + training loop + first checkpoint per tenant | 2 weeks | **`azirella-powell-core` v0.4.0 shipped 2026-05-11** (TMS pinned at `8c6cd00` via PR #71). Unblocked. |
 | **GNN-4** | Build TMS-shape **Carrier Capacity tGNN** + training loop + first checkpoint | 2 weeks | GNN-3 pattern proven |
 | **GNN-5** | Build TMS-shape **Carrier-Portfolio S&OP GraphSAGE** + weekly cadence | 3 weeks | GNN-3 + GNN-4 producing usable inputs |
 | **GNN-6** | Build TMS **Site Coordinator** (L2) + tactical hive coordinator retarget; wire L4/L3 outputs into the 11 TRMs | 2 weeks | GNN-3 + GNN-4 + GNN-5 |
