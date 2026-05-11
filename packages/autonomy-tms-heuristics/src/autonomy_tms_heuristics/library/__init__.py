@@ -63,12 +63,21 @@ from .base import (
     TMSHeuristicDecision,
 )
 from .dispatch import Actions, compute_segmented_loads, compute_tms_decision
+from .secondary_teachers import (
+    ConsensusDecision,
+    SECONDARY_TEACHERS,
+    compute_exception_management_regulatory,
+    compute_freight_procurement_dat,
+    compute_with_consensus,
+    has_secondary_teachers,
+)
 
 __all__ = [
     "Actions",
     "BrokerRoutingState",
     "CapacityBufferState",
     "CapacityPromiseState",
+    "ConsensusDecision",
     "DemandSensingState",
     "DockSchedulingState",
     "EquipmentRepositionState",
@@ -77,8 +86,13 @@ __all__ = [
     "IntermodalTransferState",
     "LaneVolumeForecastState",
     "LoadBuildState",
+    "SECONDARY_TEACHERS",
     "ShipmentTrackingState",
     "TMSHeuristicDecision",
+    "compute_exception_management_regulatory",
+    "compute_freight_procurement_dat",
     "compute_segmented_loads",
     "compute_tms_decision",
+    "compute_with_consensus",
+    "has_secondary_teachers",
 ]

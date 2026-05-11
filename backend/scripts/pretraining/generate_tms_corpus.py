@@ -53,6 +53,10 @@ except ImportError:
 from autonomy_tms_heuristics.library.dispatch import (
     compute_tms_decision, Actions,
 )
+from autonomy_tms_heuristics.library.secondary_teachers import (
+    compute_with_consensus,
+    has_secondary_teachers,
+)
 from autonomy_tms_heuristics.library.base import (
     CapacityPromiseState,
     ShipmentTrackingState,
@@ -772,43 +776,65 @@ def _add_derived_features(row: Dict[str, Any], state: Any, trm_type: str) -> Non
         row["derived_peak_season_mape"] = (1.0 if state.is_peak_season else 0.0) * state.trailing_mape
 
 
+_ACTION_NAME = {
+    0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
+    4: "MODIFY", 5: "RETENDER", 6: "REROUTE", 7: "CONSOLIDATE",
+    8: "SPLIT", 9: "REPOSITION", 10: "HOLD",
+}
+
+
 def generate_corpus(
     trm_type: str,
     n_samples: int,
     seed: int = 42,
     output_dir: Optional[Path] = None,
     phase: int = DEFAULT_PHASE,
+    secondary_teachers: bool = False,
 ) -> Path:
     """Generate n_samples of (state, action, reward) for one TRM.
 
     ``phase`` selects the curriculum band (1 baseline / 2 normal /
     3 disruption). Samplers that don't consume curriculum bands
     ignore the kwarg. See ``PHASES`` above.
+
+    ``secondary_teachers`` enables Phase-2 multi-teacher labeling
+    for TRMs registered in
+    ``autonomy_tms_heuristics.library.SECONDARY_TEACHERS``
+    (currently ``freight_procurement`` and ``exception_management``).
+    When on, each row gains ``consensus_action`` / ``disagreement``
+    / per-teacher action / reasoning columns.
     """
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {sorted(PHASES)}; got {phase}")
     sampler_fn, state_cls = SAMPLERS[trm_type]
     rng = random.Random(seed)
-    logger.info(f"{trm_type}: phase={phase} ({PHASES[phase].name})")
+    use_secondaries = bool(secondary_teachers) and has_secondary_teachers(trm_type)
+    logger.info(
+        f"{trm_type}: phase={phase} ({PHASES[phase].name})"
+        f"{' [+secondary teachers]' if use_secondaries else ''}"
+    )
 
     rows: List[Dict[str, Any]] = []
     t0 = time.time()
+    disagreement_count = 0
     for i in range(n_samples):
         try:
             state = sampler_fn(rng, phase=phase)
         except TypeError:
             # Sampler not yet phase-aware — fall back to legacy signature.
             state = sampler_fn(rng)
-        decision = compute_tms_decision(trm_type, state)
+
+        if use_secondaries:
+            consensus = compute_with_consensus(trm_type, state)
+            decision = consensus.primary
+        else:
+            consensus = None
+            decision = compute_tms_decision(trm_type, state)
 
         row = _state_to_flat_dict(state)
         _add_derived_features(row, state, trm_type)
         row["action"] = decision.action
-        row["action_name"] = {
-            0: "ACCEPT", 1: "REJECT", 2: "DEFER", 3: "ESCALATE",
-            4: "MODIFY", 5: "RETENDER", 6: "REROUTE", 7: "CONSOLIDATE",
-            8: "SPLIT", 9: "REPOSITION", 10: "HOLD",
-        }.get(decision.action, f"UNKNOWN_{decision.action}")
+        row["action_name"] = _ACTION_NAME.get(decision.action, f"UNKNOWN_{decision.action}")
         row["quantity"] = decision.quantity
         row["urgency"] = decision.urgency
         row["confidence"] = decision.confidence
@@ -819,6 +845,22 @@ def generate_corpus(
             if native is not None
             else compute_reward(decision.action, decision.urgency, decision.quantity)
         )
+        if consensus is not None:
+            row["consensus_action"] = consensus.consensus_action
+            row["consensus_action_name"] = _ACTION_NAME.get(
+                consensus.consensus_action, f"UNKNOWN_{consensus.consensus_action}",
+            )
+            row["disagreement"] = consensus.disagreement
+            row["distinct_actions"] = consensus.distinct_actions
+            for idx, sec in enumerate(consensus.secondaries, start=2):
+                teacher_name = sec.params_used.get("teacher", f"teacher_{idx}")
+                row[f"teacher_{teacher_name}_action"] = sec.action
+                row[f"teacher_{teacher_name}_action_name"] = _ACTION_NAME.get(
+                    sec.action, f"UNKNOWN_{sec.action}",
+                )
+                row[f"teacher_{teacher_name}_reasoning"] = sec.reasoning
+            if consensus.disagreement:
+                disagreement_count += 1
         rows.append(row)
 
         if (i + 1) % 10000 == 0:
@@ -831,6 +873,11 @@ def generate_corpus(
     from collections import Counter
     action_dist = Counter(r["action_name"] for r in rows)
     logger.info(f"  Action distribution: {dict(action_dist)}")
+    if use_secondaries:
+        logger.info(
+            f"  Multi-teacher disagreement: {disagreement_count}/{len(rows)} "
+            f"({100 * disagreement_count / max(1, len(rows)):.1f}%)"
+        )
 
     # Write output
     if output_dir is None:
@@ -876,6 +923,15 @@ def main():
             "3 disruption (peak / capacity crisis)"
         ),
     )
+    ap.add_argument(
+        "--secondary-teachers", action="store_true",
+        help=(
+            "Enable Phase-2 multi-teacher consensus labeling for TRMs "
+            "with registered secondaries (freight_procurement, "
+            "exception_management). Adds per-teacher action / reasoning "
+            "and a consensus_action column."
+        ),
+    )
     args = ap.parse_args()
 
     if not args.trm and not args.all:
@@ -886,13 +942,15 @@ def main():
 
     logger.info(
         f"Generating corpus: {len(trms)} TRMs × {args.samples} samples, "
-        f"seed={args.seed}, phase={args.phase}"
+        f"seed={args.seed}, phase={args.phase}, "
+        f"secondaries={'on' if args.secondary_teachers else 'off'}"
     )
     paths = []
     for trm in trms:
         p = generate_corpus(
             trm, args.samples, seed=args.seed, output_dir=output_dir,
             phase=args.phase,
+            secondary_teachers=args.secondary_teachers,
         )
         paths.append(p)
 
