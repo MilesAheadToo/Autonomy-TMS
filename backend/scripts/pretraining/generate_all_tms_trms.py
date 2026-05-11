@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Generate all 11 TMS TRM training corpora in one invocation.
+Generate all TMS TRM training corpora in one invocation.
+
+Enumerates every key in ``generate_tms_corpus.SAMPLERS`` (currently 12:
+the 11 execution TRMs plus the lane-volume forecast orchestrator) and
+writes one parquet — or jsonl fallback when ``pyarrow`` is unavailable —
+per TRM.
 
 Usage:
     python scripts/pretraining/generate_all_tms_trms.py
@@ -17,5 +22,10 @@ if str(BACKEND_ROOT) not in sys.path:
 from scripts.pretraining.generate_tms_corpus import main
 
 if __name__ == "__main__":
-    sys.argv = [sys.argv[0], "--all"] + sys.argv[1:]
+    # Only force --all if the user didn't already pick a TRM. Lets the
+    # wrapper double as a single-TRM driver for ad-hoc smoke runs.
+    forwarded = sys.argv[1:]
+    if "--trm" not in forwarded and "--all" not in forwarded:
+        forwarded = ["--all"] + forwarded
+    sys.argv = [sys.argv[0]] + forwarded
     main()

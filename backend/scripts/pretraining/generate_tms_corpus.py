@@ -67,20 +67,127 @@ from autonomy_tms_heuristics.library.base import (
     EquipmentRepositionState,
     LaneVolumeForecastState,
 )
-from app.services.powell.tms_reward_weights import compute_native_tms_reward
+
+# Load tms_reward_weights via importlib so this script stays runnable
+# in CPU dev (the powell package's __init__ transitively requires torch
+# for SiteAgentModel; the reward-weights module itself is pure Python).
+import importlib.util as _importlib_util
+from types import ModuleType as _ModuleType
+for _stub in ("app", "app.services", "app.services.powell"):
+    sys.modules.setdefault(_stub, _ModuleType(_stub))
+_rw_path = BACKEND_ROOT / "app" / "services" / "powell" / "tms_reward_weights.py"
+_rw_spec = _importlib_util.spec_from_file_location(
+    "app.services.powell.tms_reward_weights", _rw_path,
+)
+_rw_module = _importlib_util.module_from_spec(_rw_spec)
+sys.modules["app.services.powell.tms_reward_weights"] = _rw_module
+_rw_spec.loader.exec_module(_rw_module)
+compute_native_tms_reward = _rw_module.compute_native_tms_reward
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("generate_tms_corpus")
 
 
 # ============================================================================
+# Curriculum phases — DAT-anchored transport-KPI bands
+# ============================================================================
+# Closes TMS_TRM_TRAINING_DATA_SPECIFICATION.md Open Item #5 — replaces
+# SCP's scalar variance multipliers (0.15 / 0.40 / 0.75 on inventory mean)
+# with per-knob distributional bands tuned to transport benchmarks:
+#
+#   * DAT Freight Rate Index — spot premium acceptance threshold <30 %;
+#     broker premium alert >40 % over contract.
+#   * Truckstop reject-rate tranches — >15 % triggers buffer expansion.
+#   * BNSF / CSX service-level floors — intermodal reliability 80 %.
+#   * FMCSA detention study (2018) — carrier dwell > free_time + 2h = risk.
+#
+# Phase semantics:
+#   1. baseline   — stable market, contract-rate dominant, calm weather.
+#                   Teaches the policy the easy path before it sees noise.
+#   2. normal     — typical industry conditions; ≈ pre-curriculum ranges
+#                   (preserves backward compatibility with existing
+#                   checkpoints trained without --phase).
+#   3. disruption — peak-season + capacity crisis; tail conditions.
+#
+# Phase 2 is the default to keep behaviour stable for callers that don't
+# pass --phase.
+from dataclasses import dataclass
+from typing import Tuple
+
+
+@dataclass(frozen=True)
+class PhaseConfig:
+    """Curriculum phase bands. Used by phase-sensitive state samplers."""
+
+    name: str
+    # Spot premium over contract — DAT acceptance band.
+    spot_premium_max: float
+    # Market tightness — 0 loose, 1 tight.
+    market_tightness_band: Tuple[float, float]
+    # Tender reject rate — Truckstop tranches.
+    reject_rate_max: float
+    # Primary carrier on-time-performance — fleet quality at this phase.
+    primary_carrier_otp_band: Tuple[float, float]
+    # Intermodal reliability — BNSF / CSX service floor + tail.
+    intermodal_reliability_band: Tuple[float, float]
+    # Rail-ramp congestion — drayage / linehaul delays.
+    ramp_congestion_band: Tuple[float, float]
+    # Demand CV — lane volume variability.
+    demand_cv_max: float
+    # Exception severity weights — (LOW, MEDIUM, HIGH, CRITICAL) prob mass.
+    exception_severity_weights: Tuple[int, int, int, int]
+
+
+PHASES: Dict[int, PhaseConfig] = {
+    1: PhaseConfig(
+        name="phase1_baseline",
+        spot_premium_max=0.08,
+        market_tightness_band=(0.0, 0.30),
+        reject_rate_max=0.08,
+        primary_carrier_otp_band=(0.92, 0.99),
+        intermodal_reliability_band=(0.90, 0.97),
+        ramp_congestion_band=(0.0, 0.30),
+        demand_cv_max=0.30,
+        exception_severity_weights=(40, 35, 15, 10),
+    ),
+    2: PhaseConfig(
+        name="phase2_normal",
+        spot_premium_max=0.25,
+        market_tightness_band=(0.10, 0.70),
+        reject_rate_max=0.20,
+        primary_carrier_otp_band=(0.82, 0.97),
+        intermodal_reliability_band=(0.80, 0.95),
+        ramp_congestion_band=(0.10, 0.70),
+        demand_cv_max=0.55,
+        exception_severity_weights=(20, 40, 25, 15),
+    ),
+    3: PhaseConfig(
+        name="phase3_disruption",
+        spot_premium_max=0.45,
+        market_tightness_band=(0.50, 1.0),
+        reject_rate_max=0.45,
+        primary_carrier_otp_band=(0.70, 0.92),
+        intermodal_reliability_band=(0.65, 0.90),
+        ramp_congestion_band=(0.50, 1.0),
+        demand_cv_max=0.85,
+        exception_severity_weights=(10, 25, 35, 30),
+    ),
+}
+
+DEFAULT_PHASE = 2
+
+
+# ============================================================================
 # State samplers — one per TRM
 # ============================================================================
 # Each returns a populated state dataclass with realistic field distributions.
-# Distributions are calibrated against DAT/FreightWaves benchmarks and the
-# Food Dist network topology.
+# Distributions are calibrated against DAT / FreightWaves benchmarks and the
+# Food Dist network topology. Samplers that consume curriculum-driven KPIs
+# (capacity / market / reliability / exception severity) take a ``phase``
+# kwarg defaulting to ``DEFAULT_PHASE`` (= 2, normal).
 
-def _sample_capacity_promise(rng: random.Random) -> CapacityPromiseState:
+def _sample_capacity_promise(rng: random.Random, phase: int = DEFAULT_PHASE) -> CapacityPromiseState:
+    cfg = PHASES[phase]
     total_cap = rng.randint(5, 50)
     booked = rng.randint(0, total_cap)
     return CapacityPromiseState(
@@ -96,10 +203,10 @@ def _sample_capacity_promise(rng: random.Random) -> CapacityPromiseState:
         booked_loads=booked,
         primary_carrier_available=rng.random() > 0.15,
         backup_carriers_count=rng.randint(0, 5),
-        spot_rate_premium_pct=rng.uniform(0.0, 0.40),
+        spot_rate_premium_pct=rng.uniform(0.0, cfg.spot_premium_max),
         lane_acceptance_rate=rng.uniform(0.50, 0.98),
-        market_tightness=rng.uniform(0.0, 1.0),
-        primary_carrier_otp=rng.uniform(0.75, 0.99),
+        market_tightness=rng.uniform(*cfg.market_tightness_band),
+        primary_carrier_otp=rng.uniform(*cfg.primary_carrier_otp_band),
         allocation_compliance_pct=rng.uniform(0.50, 1.20),
     )
 
@@ -152,7 +259,8 @@ def _sample_demand_sensing(rng: random.Random) -> DemandSensingState:
     )
 
 
-def _sample_capacity_buffer(rng: random.Random) -> CapacityBufferState:
+def _sample_capacity_buffer(rng: random.Random, phase: int = DEFAULT_PHASE) -> CapacityBufferState:
+    cfg = PHASES[phase]
     forecast = rng.randint(5, 50)
     return CapacityBufferState(
         lane_id=rng.randint(1, 50),
@@ -162,21 +270,22 @@ def _sample_capacity_buffer(rng: random.Random) -> CapacityBufferState:
         forecast_p90=forecast + rng.randint(2, 15),
         committed_loads=rng.randint(0, forecast),
         contract_capacity=forecast + rng.randint(0, 20),
-        recent_tender_reject_rate=rng.uniform(0.0, 0.40),
-        demand_cv=rng.uniform(0.05, 0.80),
+        recent_tender_reject_rate=rng.uniform(0.0, cfg.reject_rate_max),
+        demand_cv=rng.uniform(0.05, cfg.demand_cv_max),
         demand_trend=rng.uniform(-0.3, 0.5),
-        is_peak_season=rng.random() < 0.25,
+        is_peak_season=rng.random() < (0.10 if phase == 1 else 0.25 if phase == 2 else 0.50),
         recent_capacity_miss_count=rng.choices([0, 1, 2, 3, 4, 5], weights=[40, 25, 15, 10, 5, 5])[0],
     )
 
 
-def _sample_exception_management(rng: random.Random) -> ExceptionManagementState:
+def _sample_exception_management(rng: random.Random, phase: int = DEFAULT_PHASE) -> ExceptionManagementState:
+    cfg = PHASES[phase]
     exc_types = ["LATE_DELIVERY", "LATE_PICKUP", "DETENTION", "CARRIER_BREAKDOWN",
                  "WEATHER_DELAY", "REFUSED", "TEMPERATURE_EXCURSION", "DAMAGE"]
     severities = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
     return ExceptionManagementState(
         exception_type=rng.choice(exc_types),
-        severity=rng.choices(severities, weights=[20, 40, 25, 15])[0],
+        severity=rng.choices(severities, weights=list(cfg.exception_severity_weights))[0],
         estimated_delay_hrs=rng.expovariate(0.2),
         estimated_cost_impact=rng.uniform(50, 5000),
         revenue_at_risk=rng.uniform(200, 20000),
@@ -195,8 +304,10 @@ def _sample_exception_management(rng: random.Random) -> ExceptionManagementState
     )
 
 
-def _sample_freight_procurement(rng: random.Random) -> FreightProcurementState:
+def _sample_freight_procurement(rng: random.Random, phase: int = DEFAULT_PHASE) -> FreightProcurementState:
+    cfg = PHASES[phase]
     contract_rate = rng.uniform(1500, 4000)
+    spot_multiplier = 1.0 + rng.uniform(-0.10, cfg.spot_premium_max)
     return FreightProcurementState(
         load_id=rng.randint(1, 100000),
         lane_id=rng.randint(1, 50),
@@ -209,12 +320,12 @@ def _sample_freight_procurement(rng: random.Random) -> FreightProcurementState:
         backup_carriers=[
             {"id": rng.randint(51, 100), "rate": contract_rate * rng.uniform(1.0, 1.15),
              "acceptance_pct": rng.uniform(0.40, 0.95), "priority": i + 2,
-             "otp_pct": rng.uniform(0.80, 0.98)}
+             "otp_pct": rng.uniform(*cfg.primary_carrier_otp_band)}
             for i in range(rng.randint(0, 4))
         ],
-        spot_rate=contract_rate * rng.uniform(0.90, 1.40),
+        spot_rate=contract_rate * spot_multiplier,
         contract_rate=contract_rate,
-        market_tightness=rng.uniform(0.0, 1.0),
+        market_tightness=rng.uniform(*cfg.market_tightness_band),
         dat_benchmark_rate=contract_rate * rng.uniform(0.95, 1.10),
         tender_attempt=rng.randint(1, 5),
         max_tender_attempts=rng.choice([3, 4, 5]),
@@ -292,7 +403,8 @@ def _sample_load_build(rng: random.Random) -> LoadBuildState:
     )
 
 
-def _sample_intermodal_transfer(rng: random.Random) -> IntermodalTransferState:
+def _sample_intermodal_transfer(rng: random.Random, phase: int = DEFAULT_PHASE) -> IntermodalTransferState:
+    cfg = PHASES[phase]
     truck_miles = rng.uniform(200, 2500)
     truck_rate = truck_miles * rng.uniform(2.0, 3.5)
     im_rate = truck_rate * rng.uniform(0.60, 1.05)
@@ -306,8 +418,8 @@ def _sample_intermodal_transfer(rng: random.Random) -> IntermodalTransferState:
         truck_transit_days=truck_miles / rng.uniform(400, 600),
         intermodal_transit_days=truck_miles / rng.uniform(250, 400),
         delivery_window_days=rng.uniform(0, 5),
-        ramp_congestion_level=rng.uniform(0.0, 1.0),
-        intermodal_reliability_pct=rng.uniform(0.75, 0.96),
+        ramp_congestion_level=rng.uniform(*cfg.ramp_congestion_band),
+        intermodal_reliability_pct=rng.uniform(*cfg.intermodal_reliability_band),
         is_hazmat=rng.random() < 0.05,
         is_temperature_controlled=rng.random() < 0.30,
         commodity_value_per_lb=rng.uniform(0.0, 5.0),
@@ -665,15 +777,28 @@ def generate_corpus(
     n_samples: int,
     seed: int = 42,
     output_dir: Optional[Path] = None,
+    phase: int = DEFAULT_PHASE,
 ) -> Path:
-    """Generate n_samples of (state, action, reward) for one TRM."""
+    """Generate n_samples of (state, action, reward) for one TRM.
+
+    ``phase`` selects the curriculum band (1 baseline / 2 normal /
+    3 disruption). Samplers that don't consume curriculum bands
+    ignore the kwarg. See ``PHASES`` above.
+    """
+    if phase not in PHASES:
+        raise ValueError(f"phase must be one of {sorted(PHASES)}; got {phase}")
     sampler_fn, state_cls = SAMPLERS[trm_type]
     rng = random.Random(seed)
+    logger.info(f"{trm_type}: phase={phase} ({PHASES[phase].name})")
 
     rows: List[Dict[str, Any]] = []
     t0 = time.time()
     for i in range(n_samples):
-        state = sampler_fn(rng)
+        try:
+            state = sampler_fn(rng, phase=phase)
+        except TypeError:
+            # Sampler not yet phase-aware — fall back to legacy signature.
+            state = sampler_fn(rng)
         decision = compute_tms_decision(trm_type, state)
 
         row = _state_to_flat_dict(state)
@@ -743,6 +868,14 @@ def main():
     ap.add_argument("--seed", type=int, default=42, help="Random seed")
     ap.add_argument("--output-dir", type=str, default=None,
                     help="Output directory (default: training_data/tms_corpus/)")
+    ap.add_argument(
+        "--phase", type=int, default=DEFAULT_PHASE, choices=sorted(PHASES),
+        help=(
+            "Curriculum phase: 1 baseline (stable market), "
+            "2 normal (typical industry, default), "
+            "3 disruption (peak / capacity crisis)"
+        ),
+    )
     args = ap.parse_args()
 
     if not args.trm and not args.all:
@@ -751,10 +884,16 @@ def main():
     trms = ALL_TRMS if args.all else [args.trm]
     output_dir = Path(args.output_dir) if args.output_dir else None
 
-    logger.info(f"Generating corpus: {len(trms)} TRMs × {args.samples} samples, seed={args.seed}")
+    logger.info(
+        f"Generating corpus: {len(trms)} TRMs × {args.samples} samples, "
+        f"seed={args.seed}, phase={args.phase}"
+    )
     paths = []
     for trm in trms:
-        p = generate_corpus(trm, args.samples, seed=args.seed, output_dir=output_dir)
+        p = generate_corpus(
+            trm, args.samples, seed=args.seed, output_dir=output_dir,
+            phase=args.phase,
+        )
         paths.append(p)
 
     logger.info(f"Done. {len(paths)} files written.")

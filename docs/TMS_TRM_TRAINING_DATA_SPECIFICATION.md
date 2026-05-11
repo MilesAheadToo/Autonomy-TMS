@@ -45,9 +45,9 @@ approach is appropriate because the transportation heuristics are more
 discrete (waterfall, threshold-based) and have less legitimate
 disagreement across methods than inventory policies do.
 
-Scripts (planned, mirroring SCP layout):
-- `backend/scripts/pretraining/generate_tms_corpus.py` — per-TRM corpus
-- `backend/scripts/pretraining/generate_all_tms_trms.py` — all 11 TRMs
+Scripts (shipped):
+- [`backend/scripts/pretraining/generate_tms_corpus.py`](../backend/scripts/pretraining/generate_tms_corpus.py) — per-TRM corpus (`--trm <name>` or `--all`)
+- [`backend/scripts/pretraining/generate_all_tms_trms.py`](../backend/scripts/pretraining/generate_all_tms_trms.py) — thin wrapper that invokes the per-TRM script with `--all`. Enumerates 12 entries (11 execution TRMs + `lane_volume_forecast`).
 
 ---
 
@@ -690,16 +690,34 @@ state builders on top of the transport-oriented scenario archetypes.
 - STABLE 20% · SEASONAL 25% · TRENDING_UP 15% · TRENDING_DOWN 10%
 - STEP_CHANGE 10% · PROMOTIONAL 5% · RANDOM 15%
 
-### Phase-aware variance (curriculum)
-- Phase 1: variance = 0.15 (tight, teach baseline behavior)
-- Phase 2: variance = 0.40 (moderate — carrier reject, weather)
-- Phase 3: variance = 0.75 (high — disruptions, peak season chaos)
+### Phase-aware curriculum (DAT-anchored, TMS-native)
 
-### Sampled ranges
-- Transit lead time: `Normal(3d, 0.9)` clipped to [0.5, 5] days
-- Demand CV: `Normal(0.15 + phase_var, σ)` clipped to [0.05, 0.95]
-- Initial pipeline: [20, 60]
-- Backlog: [0, 10]
+Replaces SCP's scalar variance multipliers (`0.15 / 0.40 / 0.75` on inventory
+mean) with per-knob distributional bands tuned to transport benchmarks.
+Live in `PHASES` at the top of
+[`generate_tms_corpus.py`](../backend/scripts/pretraining/generate_tms_corpus.py).
+Default is **phase 2**.
+
+| Knob | Phase 1 baseline | Phase 2 normal | Phase 3 disruption | Industry anchor |
+|---|---|---|---|---|
+| `spot_premium_max` | 0.08 | 0.25 | 0.45 | DAT acceptance threshold 0.30 |
+| `market_tightness_band` | (0.0, 0.30) | (0.10, 0.70) | (0.50, 1.0) | DAT / FreightWaves |
+| `reject_rate_max` | 0.08 | 0.20 | 0.45 | Truckstop tranches; buffer-expansion threshold 0.15 |
+| `primary_carrier_otp_band` | (0.92, 0.99) | (0.82, 0.97) | (0.70, 0.92) | Fleet quality |
+| `intermodal_reliability_band` | (0.90, 0.97) | (0.80, 0.95) | (0.65, 0.90) | BNSF / CSX floor 0.80 |
+| `ramp_congestion_band` | (0.0, 0.30) | (0.10, 0.70) | (0.50, 1.0) | AAR ramp data |
+| `demand_cv_max` | 0.30 | 0.55 | 0.85 | Operations research |
+| `exception_severity_weights` (LOW, MED, HIGH, CRITICAL) | (40, 35, 15, 10) | (20, 40, 25, 15) | (10, 25, 35, 30) | FMCSA / project44 |
+
+Phase-aware samplers (consume the bands above): `_sample_capacity_promise`,
+`_sample_capacity_buffer`, `_sample_freight_procurement`,
+`_sample_intermodal_transfer`, `_sample_exception_management`. The other
+samplers ignore the `phase` kwarg; corpus generation still passes it for
+forward compatibility.
+
+CLI: `--phase 1 | 2 | 3` (default 2). Backward-compatible — checkpoints
+trained without `--phase` see the same distributions they did before
+the curriculum was introduced.
 
 ### Decision source distribution (training labels)
 - EXPERT_HUMAN 40% · AI_ACCEPTED 25% · AI_MODIFIED 15%
@@ -826,9 +844,9 @@ back to the generic action-based `compute_reward()`.
 
 3. **Live backtests** — SCP has a live-data backtest (PO Creation → 99.6% on real SAP decisions). TMS needs the same: a frozen carrier-tender history from an Oracle OTM or SAP TM extract to validate tender waterfall decisions against planner choices.
 
-4. **Training corpus generator** — `generate_all_tms_trms.py` script not yet written; models are conceptually specified but corpus pipeline needs implementation.
+4. **Training corpus generator** — ~~`generate_all_tms_trms.py` script not yet written.~~ **Closed 2026-05-11.** Both [`generate_tms_corpus.py`](../backend/scripts/pretraining/generate_tms_corpus.py) and the wrapper [`generate_all_tms_trms.py`](../backend/scripts/pretraining/generate_all_tms_trms.py) are shipped and tested end-to-end against all 12 samplers. CPU-dev smoke run: `python scripts/pretraining/generate_all_tms_trms.py --samples 5 --output-dir /tmp/smoke`.
 
-5. **Curriculum phases** — Current generator uses SCP's phase variance (0.15 / 0.40 / 0.75). Validate those are appropriate for transportation or tune to reject-rate curves from DAT data.
+5. **Curriculum phases** — ~~Current generator uses SCP's phase variance (0.15 / 0.40 / 0.75).~~ **Closed 2026-05-11.** Replaced with TMS-native per-knob `PhaseConfig` bands at the top of [`generate_tms_corpus.py`](../backend/scripts/pretraining/generate_tms_corpus.py), anchored to DAT spot-premium / Truckstop reject-rate / BNSF-CSX intermodal-reliability / FMCSA exception-severity benchmarks. CLI flag `--phase 1|2|3` with default 2. Phase-shift invariants locked in [`test_corpus_phase_curriculum.py`](../backend/tests/services/powell/test_corpus_phase_curriculum.py).
 
 ---
 
