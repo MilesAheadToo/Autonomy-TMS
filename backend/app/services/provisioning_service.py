@@ -560,6 +560,46 @@ class ProvisioningService:
             return await handler(config_id)
         return {"status": "ok", "note": f"Step {step_key} placeholder — not yet implemented"}
 
+    async def _step_market_intelligence(self, config_id: int) -> dict:
+        """Activate default external signal sources, filtered by the config's
+        DAG topology.
+
+        Reuses ``ExternalSignalService.activate_default_sources(config_id)``
+        which reads sites (coordinates + state codes + region), products
+        (families + keywords), transportation lanes (corridors + freight
+        routes), industry tags, and supplier countries from the supply-chain
+        config — and inserts one ExternalSignalSource row per free public
+        feed (Open-Meteo, NWS, DOT, GDELT, Google Trends, Reddit, openFDA)
+        with its filter parameters pre-populated. TMS commercial freight
+        feeds (DAT, SONAR, MarineTraffic, …) stay off until credentials
+        are supplied via the admin UI.
+
+        The same code path runs when an admin clicks "Activate Defaults"
+        in the Context Engine page; doing it during provisioning means
+        every new tenant boots with Market Intelligence already on.
+        """
+        tenant_id = await self._resolve_tenant_id(config_id)
+        if not tenant_id:
+            return {"error": f"Could not resolve tenant_id for config {config_id}"}
+
+        from app.services.external_signal_service import ExternalSignalService
+
+        service = ExternalSignalService(self.db, tenant_id=tenant_id)
+        try:
+            created = await service.activate_default_sources(config_id)
+        except Exception as e:
+            logger.exception(
+                "market_intelligence: activate_default_sources failed for "
+                "tenant=%s config=%s", tenant_id, config_id,
+            )
+            return {"error": f"activate_default_sources failed: {e}"}
+
+        return {
+            "status": "ok",
+            "sources_activated": len(created),
+            "source_keys": [c.get("source_key") for c in created],
+        }
+
     async def _step_warm_start(self, config_id: int) -> dict:
         """Step 1: Generate historical demand data.
 
