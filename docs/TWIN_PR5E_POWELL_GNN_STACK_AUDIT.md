@@ -20,7 +20,13 @@ selects audit Option 5.B (replace with TMS-shape) over Option 5.A
 plane-agnostic substrate stays as the foundation for the rewrite.
 Q2 (frontend usage) is deferred until the rewrite reaches the point
 where the SCP-shape admin pages need to be retired or repurposed.
-The rewrite workstream is tracked separately from TWIN_REWRITE_PLAN.md.
+
+**Rewrite plan drafted 2026-05-11:** see [`TMS_POWELL_GNN_REWRITE.md`](TMS_POWELL_GNN_REWRITE.md)
+for the TMS-side head designs (carrier-portfolio S&OP GraphSAGE,
+Lane Volume Forecast tGNN, Carrier Capacity tGNN, TMS Site
+Coordinator), the 6-stage rewrite sequence (GNN-1 through GNN-6),
+the SCP-fork residue inventory updated with TMS-shape replacements
+or deletions, and the substrate-contract requirements for Core.
 
 ---
 
