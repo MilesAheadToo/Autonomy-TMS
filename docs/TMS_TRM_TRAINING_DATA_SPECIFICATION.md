@@ -38,12 +38,28 @@ Network Generator → Transport State Sampler → Single-Teacher Labeler → Par
 ```
 
 **Key difference from SCP:** TMS uses a **single deterministic teacher
-per state** (one call into `compute_tms_decision()` in
-`tms_heuristic_library/dispatch.py`), producing one label per state.
-SCP uses 8 teachers per state to form a consensus. TMS's single-teacher
-approach is appropriate because the transportation heuristics are more
-discrete (waterfall, threshold-based) and have less legitimate
-disagreement across methods than inventory policies do.
+per state by default** (one call into `compute_tms_decision()` in
+`library/dispatch.py`). SCP uses 8 teachers per state to form a
+consensus. TMS's single-teacher default is appropriate because
+transportation heuristics are more discrete (waterfall, threshold-
+based) and have less legitimate disagreement across methods than
+inventory policies do.
+
+**Phase-2 multi-teacher mode** (CLI: `--secondary-teachers`) adds
+secondary labelers where two industry-recognised perspectives
+legitimately diverge:
+- **DAT-pure FreightProcurement** — picks the cheapest carrier inside
+  the DAT band; ignores reliability scoring. The "cost-only buyer".
+- **Regulatory-first ExceptionManagement** — escalates on FDA
+  cold-chain / DOT 49 CFR hazmat / DOT post-accident reporting /
+  FMCSA HOS triggers regardless of priority-score math. The
+  "compliance officer".
+
+Disagreement between primary and a secondary is emitted as
+`consensus_action` / `disagreement` / per-teacher action+reasoning
+columns on the corpus row. Empirically ~5–10 % of rows disagree under
+phase 3 disruption. The seven other TRMs have no registered
+secondary and stay single-teacher.
 
 Scripts (shipped):
 - [`backend/scripts/pretraining/generate_tms_corpus.py`](../backend/scripts/pretraining/generate_tms_corpus.py) — per-TRM corpus (`--trm <name>` or `--all`)
@@ -840,7 +856,7 @@ back to the generic action-based `compute_reward()`.
 
 1. **Native TMS reward weights** — ~~Dock Scheduling, Intermodal Transfer, Equipment Reposition, Load Build currently inherit SC proxies.~~ **Closed 2026-05-10.** Native transport-KPI weights live in [`tms_reward_weights.py`](../backend/app/services/powell/tms_reward_weights.py); see the table above. Future revisit: replace any of the remaining seven SCP-proxy mappings if real TMS KPI data shows the proxy is misleading the training signal.
 
-2. **Phase 2 teachers** — TMS currently uses single-teacher labels. Add secondary teachers (e.g. DAT-benchmark based freight procurement, regulatory-first exception escalation) to introduce multi-teacher consensus matching SCP's approach.
+2. **Phase 2 teachers** — ~~TMS currently uses single-teacher labels.~~ **Closed 2026-05-11.** Two secondaries shipped in [`autonomy_tms_heuristics.library.secondary_teachers`](../packages/autonomy-tms-heuristics/src/autonomy_tms_heuristics/library/secondary_teachers.py): DAT-pure FreightProcurement + regulatory-first ExceptionManagement. CLI flag `--secondary-teachers` enables multi-teacher labeling for those two TRMs; corpus rows gain `consensus_action` / `disagreement` / per-teacher columns. Locked in [`test_secondary_teachers.py`](../packages/autonomy-tms-heuristics/tests/test_secondary_teachers.py) (16 tests).
 
 3. **Live backtests** — SCP has a live-data backtest (PO Creation → 99.6% on real SAP decisions). TMS needs the same: a frozen carrier-tender history from an Oracle OTM or SAP TM extract to validate tender waterfall decisions against planner choices.
 
