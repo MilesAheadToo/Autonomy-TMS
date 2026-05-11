@@ -709,27 +709,40 @@ state builders on top of the transport-oriented scenario archetypes.
 
 ## Reward Functions
 
-TMS TRMs currently inherit SCP-analogue reward weights from
-`DEFAULT_TRM_REWARD_WEIGHTS`. Mappings:
+Four TMS TRMs have **native transport-KPI reward weights** in
+[`backend/app/services/powell/tms_reward_weights.py`](../backend/app/services/powell/tms_reward_weights.py)
+— `TMS_TRM_REWARD_WEIGHTS`. The other seven retain SCP-analogue
+weights from `DEFAULT_TRM_REWARD_WEIGHTS` (spec §6 considers those
+mappings appropriate; revisit if SCP-shape signal semantics drift
+from TMS reality).
 
-| TMS TRM | SC Proxy | Weights |
-|---------|----------|---------|
-| Capacity Promise | ATP_EXECUTOR | fill_rate (0.4) + on_time_bonus (0.2) + priority_weight (0.2) + fairness_penalty (0.2) |
-| Exception Management | ORDER_TRACKING | detection (0.4) + resolution_speed (0.3) + escalation (0.3) |
-| Intermodal Transfer | TO_EXECUTION | on_time_delivery (0.4) + consolidation_bonus (0.3) + cost_efficiency (0.3) |
-| Equipment Reposition | REBALANCING | service_improvement (0.5) + transfer_cost_penalty (0.3) + balance_improvement (0.2) |
-| Freight Procurement | PO_CREATION | stockout_penalty (0.4) + target_coverage (0.3) + cost (0.2) + timing (0.1) |
-| Load Build | ATP_EXECUTOR | fill_rate emphasized; consolidation savings as bonus |
-| Dock Scheduling | — | TODO: native TMS weights (dwell, detention, throughput) |
-| Broker Routing | PO_CREATION | cost + reliability blend |
-| Capacity Buffer | SAFETY_STOCK | service_level_deviation (0.5) + holding_cost (0.3) + excess (0.2) |
-| Shipment Tracking | ORDER_TRACKING | detection + resolution + escalation |
-| Demand Sensing | FORECAST_ADJUSTMENT | bias_reduction (0.5) + MAPE_improvement (0.3) + stability (0.2) |
-| Forecast Baseline | FORECAST_BASELINE | MAPE (0.5) + FVA (0.3) + conformal_coverage (0.2) |
+| TMS TRM | Source | Weights |
+|---------|--------|---------|
+| Capacity Promise | SCP proxy (ATP_EXECUTOR) | fill_rate (0.4) + on_time_bonus (0.2) + priority_weight (0.2) + fairness_penalty (0.2) |
+| Exception Management | SCP proxy (ORDER_TRACKING) | detection (0.4) + resolution_speed (0.3) + escalation (0.3) |
+| **Intermodal Transfer** | **NATIVE TMS** | mode_shift_savings (0.40) + on_time_intermodal (0.25) + delivery_window_slack (0.20) + reliability_bonus (0.15) |
+| **Equipment Reposition** | **NATIVE TMS** | reposition_roi (0.40) + fleet_utilization_gain (0.30) + network_balance_improvement (0.20) + transit_cost_penalty (0.10) |
+| Freight Procurement | SCP proxy (PO_CREATION) | stockout_penalty (0.4) + target_coverage (0.3) + cost (0.2) + timing (0.1) |
+| **Load Build** | **NATIVE TMS** | fill_rate (0.40) + consolidation_savings (0.30) + stops_efficiency (0.15) + priority_alignment (0.15); hazmat / temp conflicts hard-gate to REJECT |
+| **Dock Scheduling** | **NATIVE TMS** | throughput_alignment (0.35) + detention_avoidance (0.35) + dwell_efficiency (0.20) + priority_alignment (0.10) |
+| Broker Routing | SCP proxy (PO_CREATION) | cost + reliability blend |
+| Capacity Buffer | SCP proxy (SAFETY_STOCK) | service_level_deviation (0.5) + holding_cost (0.3) + excess (0.2) |
+| Shipment Tracking | SCP proxy (ORDER_TRACKING) | detection + resolution + escalation |
+| Demand Sensing | SCP proxy (FORECAST_ADJUSTMENT) | bias_reduction (0.5) + MAPE_improvement (0.3) + stability (0.2) |
+| Forecast Baseline | SCP proxy (FORECAST_BASELINE) | MAPE (0.5) + FVA (0.3) + conformal_coverage (0.2) |
 
-**Open action:** Native TMS reward weights for Dock Scheduling,
-Intermodal Transfer, Equipment Reposition, and Load Build should
-replace the SC proxies once real transport KPI data is collected.
+Native-weight provenance — domain thresholds and weight magnitudes
+follow §6 industry references (DAT, AAR, FMCSA, BNSF / CSX service
+floors, operations-research consolidation literature). Each native
+reward function is unit-tested for directional correctness against
+clear-case scenarios in
+[`backend/tests/services/powell/test_tms_reward_weights.py`](../backend/tests/services/powell/test_tms_reward_weights.py).
+
+The native reward functions are invoked from
+[`generate_tms_corpus.py`](../backend/scripts/pretraining/generate_tms_corpus.py)
+via `compute_native_tms_reward(trm_name, state, decision)`. When this
+returns `None` (the seven SCP-proxy TRMs) the corpus generator falls
+back to the generic action-based `compute_reward()`.
 
 ---
 
@@ -807,7 +820,7 @@ replace the SC proxies once real transport KPI data is collected.
 
 ## Open Items
 
-1. **Native TMS reward weights** — Dock Scheduling, Intermodal Transfer, Equipment Reposition, Load Build currently inherit SC proxies. Need transport-specific KPIs (dwell time, detention dollars, intermodal OTD, fleet utilization).
+1. **Native TMS reward weights** — ~~Dock Scheduling, Intermodal Transfer, Equipment Reposition, Load Build currently inherit SC proxies.~~ **Closed 2026-05-10.** Native transport-KPI weights live in [`tms_reward_weights.py`](../backend/app/services/powell/tms_reward_weights.py); see the table above. Future revisit: replace any of the remaining seven SCP-proxy mappings if real TMS KPI data shows the proxy is misleading the training signal.
 
 2. **Phase 2 teachers** — TMS currently uses single-teacher labels. Add secondary teachers (e.g. DAT-benchmark based freight procurement, regulatory-first exception escalation) to introduce multi-teacher consensus matching SCP's approach.
 

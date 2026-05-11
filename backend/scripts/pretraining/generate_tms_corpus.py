@@ -67,6 +67,7 @@ from autonomy_tms_heuristics.library.base import (
     EquipmentRepositionState,
     LaneVolumeForecastState,
 )
+from app.services.powell.tms_reward_weights import compute_native_tms_reward
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("generate_tms_corpus")
@@ -687,7 +688,12 @@ def generate_corpus(
         row["urgency"] = decision.urgency
         row["confidence"] = decision.confidence
         row["reasoning"] = decision.reasoning
-        row["reward"] = compute_reward(decision.action, decision.urgency, decision.quantity)
+        native = compute_native_tms_reward(trm_type, state, decision)
+        row["reward"] = (
+            native
+            if native is not None
+            else compute_reward(decision.action, decision.urgency, decision.quantity)
+        )
         rows.append(row)
 
         if (i + 1) % 10000 == 0:
