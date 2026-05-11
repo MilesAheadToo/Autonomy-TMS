@@ -9,7 +9,9 @@
 
 ## 1. Why this rewrite — the SCP-fork problem
 
-[TWIN_PR5E_POWELL_GNN_STACK_AUDIT.md](TWIN_PR5E_POWELL_GNN_STACK_AUDIT.md) found **15 files, 9,585 lines, zero TMS TRM consumers** in the Powell GNN inference / training stack. Every output schema (RCCP capacity, MPS validation, bullwhip coefficient, stockout probability, days-of-supply) is SCP-shape. The provisioning steps train them on SCP-shape data; APScheduler reruns them daily; nothing reads the results.
+[TWIN_PR5E_POWELL_GNN_STACK_AUDIT.md](TWIN_PR5E_POWELL_GNN_STACK_AUDIT.md) catalogued **15 files, 9,585 lines, zero TMS TRM consumers** in the Powell GNN inference / training stack. Every output schema (RCCP capacity, MPS validation, bullwhip coefficient, stockout probability, days-of-supply) was SCP-shape.
+
+**Status correction 2026-05-11:** 8 of the 15 files were deleted by [PR #58](https://github.com/azirella-ltd/Autonomy-TMS/pull/58) (PR-5.E Option B) **before** this rewrite plan was drafted — the audit's inventory was already partly out of date when PR #67 landed. Updated per-file state is in §3 below.
 
 The audit gave the user a choice: delete (5.A) or rewrite (5.B). User chose 5.B on the basis that the multi-tier Powell architecture (Strategic / Tactical / Execution per CLAUDE.md) is the foundation the TMS plane should keep. The substrate (training loop, checkpoint storage, signal bus, GraphSAGE / tGNN scaffolding) is generic — only the *decision heads* and the *training data they expect* are plane-specific.
 
@@ -37,51 +39,64 @@ The commercial shape Option C unlocks (per market analysis): **substrate fee (Co
 
 ---
 
-## 3. SCP-fork residue — inventory of what needs replacing
+## 3. SCP-fork residue — current state (audited 2026-05-11)
 
-Per the PR-5.E audit, 15 files / 9,585 lines:
+Per-file presence vs the PR-5.E audit's original 15-file inventory.
+PR #58 (PR-5.E Option B) deleted 8 files before this rewrite plan
+was authored.
 
-### 3.1 SCP-shape tactical heads (4 files, 1,995 lines) — REPLACE
+### 3.1 SCP-shape tactical heads — **DELETED by PR #58** ✅
 
-| File | Lines | Current output | TMS replacement output |
+| File | Status |
+|---|---|
+| `supply_planning_tgnn_service.py` | DELETED |
+| `demand_planning_tgnn_service.py` | DELETED |
+| `inventory_optimization_tgnn_service.py` | DELETED |
+| `capacity_rccp_tgnn_service.py` | DELETED |
+
+TMS replacements per §4: Lane Volume Forecast tGNN, Carrier Capacity
+tGNN. The other two SCP-shape services (supply, inventory) have no
+TMS analogue and were correctly fully deleted.
+
+### 3.2 Plane-agnostic-ish heads — PRESENT, need retarget
+
+| File | Lines | Status | Disposition |
 |---|---:|---|---|
-| `supply_planning_tgnn_service.py` | 449 | "supply exception probability", "lead time risk" | — (no TMS analogue) |
-| `demand_planning_tgnn_service.py` | 472 | "demand forecasts", "bullwhip coefficient" | **Lane Volume Forecast tGNN** — lane-grain volume p50/p10/p90 per Strategic/Tactical/Execution tier |
-| `inventory_optimization_tgnn_service.py` | 476 | "buffer adjustment signals", "stockout probability" | — (Capacity Buffer TRM covers the per-lane analogue; no GNN needed) |
-| `capacity_rccp_tgnn_service.py` | 598 | "RCCP validation against MPS" | **Carrier Capacity tGNN** — per-lane carrier-capacity forecast with confidence; feeds CapacityPromise TRM |
+| `sop_inference_service.py` | ~28k | PRESENT | Retarget to carrier-portfolio S&OP (GNN-5). Substrate (GraphSAGE) stays; output schema rewritten. |
+| `execution_gnn_inference_service.py` | ~19k | PRESENT | Retarget to per-site dispatch readiness (GNN-4 / GNN-6 boundary). |
+| `gnn_orchestration_service.py` | ~20k | PRESENT | Plane-agnostic; minimal rewrite to wire new TMS heads. |
 
-**Result:** 2 of the 4 tactical heads become TMS-shape; the other 2 are deleted (no TMS analogue).
+### 3.3 Coordination + scheduling — mixed
 
-### 3.2 Plane-agnostic-ish heads (3 files, 1,691 lines) — RETARGET
+| File | Status | Disposition |
+|---|---|---|
+| `tactical_hive_coordinator.py` | DELETED ✅ | Was SCP-shape; rebuilt in GNN-6 as TMS Site Coordinator. |
+| `joint_inventory_capacity_service.py` | DELETED ✅ | No TMS joint-optimization analogue; correct delete. |
+| `inter_hive_signal.py` | PRESENT | Plane-agnostic; promotes to Core substrate (`packages/powell-core`). |
+| `relearning_jobs.py` | PRESENT | APScheduler entries. **GNN-1 status**: daily GNN-orchestration cron disabled 2026-05-05; the `/site-agent/gnn/run-cycle` REST endpoint is now also disabled (2026-05-11, this PR). Other Powell jobs (skill outcome collection, escalation arbiter, causal matching, etc.) continue to run — they don't touch the deleted tactical tGNNs. |
 
-| File | Lines | Disposition |
-|---|---:|---|
-| `sop_inference_service.py` | 685 | Retarget to carrier-portfolio S&OP (lane mix, dedicated vs broker split, equipment fleet sizing). Substrate (GraphSAGE) stays; output schema rewritten. |
-| `execution_gnn_inference_service.py` | 486 | Retarget to **per-site dispatch readiness** — short-horizon predictions of tender acceptance, dock congestion, exception risk that feed L2 site coordinator. Replaces the SCP-shape "demand forecasts (short-term, daily)". |
-| `gnn_orchestration_service.py` | 520 | Plane-agnostic; minimal rewrite to wire new TMS heads. |
+### 3.4 Training — mixed
 
-### 3.3 Coordination + scheduling (4 files, 2,202 lines) — RETARGET
+| File | Status | Disposition |
+|---|---|---|
+| `tactical_tgnn_training_service.py` | DELETED ✅ | New TMS-shape training in GNN-3 / GNN-4. |
+| `powell_training_service.py` | PRESENT | Substrate piece (training loop, checkpoint storage) promotes to Core; TMS-specific training-config registration stays here. |
+| `generic_training_orchestrator.py` | PRESENT | Substrate; promotes to Core. |
 
-| File | Lines | Disposition |
-|---|---:|---|
-| `tactical_hive_coordinator.py` | 625 | Architecture diagram retargets SCP TRM names → TMS TRM names. Substrate (signal bus, coordination protocol) stays. |
-| `joint_inventory_capacity_service.py` | 166 | Delete (no TMS joint-optimization analogue) or retarget to **joint carrier-capacity + equipment-balance optimization**. |
-| `inter_hive_signal.py` | 197 | Plane-agnostic; promotes to Core substrate (`packages/powell-core`). |
-| `relearning_jobs.py` | 1,214 | Retarget APScheduler jobs to new TMS heads + correct triggers (lane-volume drift, carrier-OTP drop, etc.). |
+### 3.5 Top-level orchestrator — DELETED ✅
 
-### 3.4 Training (3 files, 2,397 lines) — RETARGET
+`agent_orchestrator_service.py` was deleted by PR #58. New TMS-shape
+orchestrator wires through GNN-6 (TMS Site Coordinator).
 
-| File | Lines | Disposition |
-|---|---:|---|
-| `tactical_tgnn_training_service.py` | 616 | Retarget training loops to the 2 new TMS-shape heads (Lane Volume Forecast, Carrier Capacity). |
-| `powell_training_service.py` | 1,256 | Substrate piece (training loop, checkpoint storage) promotes to Core; TMS-specific training-config registration stays here. |
-| `generic_training_orchestrator.py` | 525 | Substrate; promotes to Core. |
+### 3.6 Net inventory
 
-### 3.5 Top-level orchestrator (1 file, 1,300 lines) — RETARGET
-
-| File | Lines | Disposition |
-|---|---:|---|
-| `agent_orchestrator_service.py` | 1,300 | Architecture diagram refers to "S&OP GraphSAGE → Execution tGNN → Narrow TRMs" — the SCP planning cascade. Retarget to TMS cascade: carrier-portfolio S&OP → dispatch-readiness tGNN → 11 TMS TRMs. |
+**7 files PRESENT** in the SCP-fork residue (down from 15):
+`sop_inference_service.py`, `execution_gnn_inference_service.py`,
+`gnn_orchestration_service.py`, `inter_hive_signal.py`,
+`relearning_jobs.py`, `powell_training_service.py`,
+`generic_training_orchestrator.py`. All 7 are either retarget-in-place
+or substrate-promote candidates — none need a fresh-from-scratch
+build.
 
 ---
 
@@ -158,7 +173,7 @@ Six staged PRs. Each is independently mergeable.
 
 | Stage | Scope | Effort | Depends on |
 |---|---|---|---|
-| **GNN-1** | Disable SCP-shape APScheduler cron entries; verify nothing user-facing breaks (parallel to PR-5.E.2 in the audit) | 1 day | — |
+| **GNN-1** | ~~Disable SCP-shape APScheduler cron entries; verify nothing user-facing breaks~~ **Done 2026-05-11**. Daily GNN-orchestration cron was disabled 2026-05-05 (commit in `relearning_jobs.py`); manual `/site-agent/gnn/run-cycle` REST endpoint returns HTTP 410 Gone as of this update. | — | — |
 | **GNN-2** | Strip SCP-shape provisioning steps; new tenants stop training SCP-shape models | 2 days | GNN-1 soaked 1 week |
 | **GNN-3** | Build TMS-shape **Lane Volume Forecast tGNN** + training loop + first checkpoint per tenant | 2 weeks | Substrate extraction (Core-side) at least started |
 | **GNN-4** | Build TMS-shape **Carrier Capacity tGNN** + training loop + first checkpoint | 2 weeks | GNN-3 pattern proven |

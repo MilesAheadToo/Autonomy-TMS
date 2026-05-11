@@ -1107,20 +1107,32 @@ async def run_gnn_orchestration_cycle(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Run the full GNN inference → directive broadcast cycle.
+    """GNN orchestration cycle endpoint — **disabled** by GNN-1.
 
-    Steps:
-        1. S&OP GraphSAGE inference (uses cache unless force_recompute)
-        2. Execution Temporal GNN inference
-        3. Merge outputs into per-site directive parameters
-        4. Generate tGNNSiteDirectives
-        5. Broadcast to registered SiteAgents
-        6. Collect feedback
+    Returns HTTP 410 Gone. The underlying ``GNNOrchestrationService``
+    runs SCP-shape S&OP + Execution tGNN inference whose directives
+    no TMS plane code consumes (per PR-5.E audit). The daily
+    APScheduler cron driving this cycle was disabled
+    [2026-05-05](../app/services/powell/relearning_jobs.py); this
+    endpoint is the matching manual surface.
 
-    This is the Layer 2 multi-site coordination pipeline.
-    Normally runs daily via APScheduler; this endpoint allows manual trigger.
+    Re-enable once the rewrite plan
+    [TMS_POWELL_GNN_REWRITE.md](../../docs/TMS_POWELL_GNN_REWRITE.md)
+    lands TMS-shape replacements (GNN-3 through GNN-6) and the
+    broadcast has live consumers.
     """
+    from fastapi import status as _http_status
+    raise HTTPException(
+        status_code=_http_status.HTTP_410_GONE,
+        detail=(
+            "GNN orchestration cycle disabled (GNN-1, 2026-05-11). "
+            "Outputs are SCP-shape and have no TMS consumers; re-enable "
+            "once TMS-shape replacements ship per TMS_POWELL_GNN_REWRITE.md."
+        ),
+    )
+
+    # ── Dead path below — kept for the forensic / development case
+    # when the endpoint is manually re-enabled by editing this file.
     from app.services.powell.gnn_orchestration_service import GNNOrchestrationService
     from app.models.supply_chain_config import SupplyChainConfig
 
