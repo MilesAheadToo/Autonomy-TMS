@@ -272,69 +272,6 @@ class TestTrainingRecordSignals:
 
 
 # ---------------------------------------------------------------------------
-# 5. Outcome collector signal-aware reward bonus
-# ---------------------------------------------------------------------------
-
-class TestSignalAwareRewardBonus:
-    """Test the signal-aware coordination bonus in OutcomeCollectorService."""
-
-    @pytest.fixture
-    def collector(self):
-        from app.services.powell.outcome_collector import OutcomeCollectorService
-        db = MagicMock()
-        return OutcomeCollectorService(db)
-
-    def test_positive_reward_gets_bonus(self, collector):
-        """Positive reward with signal context gets +5% bonus."""
-        decision = MagicMock()
-        decision.signal_context = {"atp_shortage": True}
-
-        result = collector._apply_signal_bonus(decision, 1.0)
-        assert abs(result - 1.05) < 1e-6
-
-    def test_negative_reward_gets_penalty(self, collector):
-        """Negative reward with signal context gets -2% penalty (more negative)."""
-        decision = MagicMock()
-        decision.signal_context = {"demand_surge": True}
-
-        result = collector._apply_signal_bonus(decision, -1.0)
-        assert abs(result - (-1.02)) < 1e-6
-
-    def test_zero_reward_unchanged(self, collector):
-        """Zero reward stays zero regardless of signals."""
-        decision = MagicMock()
-        decision.signal_context = {"some_signal": True}
-
-        result = collector._apply_signal_bonus(decision, 0.0)
-        assert result == 0.0
-
-    def test_no_signal_context_unchanged(self, collector):
-        """Reward without signal context is unchanged."""
-        decision = MagicMock()
-        decision.signal_context = None
-
-        result = collector._apply_signal_bonus(decision, 1.0)
-        assert result == 1.0
-
-    def test_empty_signal_context_unchanged(self, collector):
-        """Empty signal context (falsy) is unchanged."""
-        decision = MagicMock()
-        decision.signal_context = {}
-
-        result = collector._apply_signal_bonus(decision, 1.0)
-        assert result == 1.0
-
-    def test_exception_returns_base_reward(self, collector):
-        """Exception during bonus computation returns base reward."""
-        decision = MagicMock()
-        # signal_context property raises an exception
-        type(decision).signal_context = property(lambda s: (_ for _ in ()).throw(RuntimeError("boom")))
-
-        result = collector._apply_signal_bonus(decision, 1.0)
-        assert result == 1.0
-
-
-# ---------------------------------------------------------------------------
 # 6. Integration: decision_integration persists signal fields
 # ---------------------------------------------------------------------------
 

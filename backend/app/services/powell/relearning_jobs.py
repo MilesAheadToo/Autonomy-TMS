@@ -372,19 +372,33 @@ def _run_trm_outcome_collection() -> None:
 def _run_skill_outcome_collection() -> None:
     """Collect outcomes for Claude Skills decisions in decision_embeddings.
 
-    Uses the sync KB session since decision_embeddings lives in the KB database
-    (which may be on a separate host, e.g. the Acer worker node).
+    §3.69 adoption: orchestration loop now lives in Core's
+    ``OutcomeCollectorService.collect_skill_outcomes``. This wrapper
+    opens both the KB session (for ``DecisionEmbedding``) and the
+    primary backend session (for ``OutboundOrderLine`` / ``InvLevel``
+    compute reads) and hands them to Core.
     """
     from app.db.kb_session import get_sync_kb_session
+    from app.db.session import SessionLocal
 
-    logger.info("Starting scheduled skill outcome collection")
+    logger.info("Starting scheduled skill outcome collection (Core orchestration)")
 
+    op_db = SessionLocal()
     try:
-        with get_sync_kb_session() as db:
-            from app.services.powell.outcome_collector import OutcomeCollectorService
+        with get_sync_kb_session() as kb_db:
+            from azirella_data_model.governance.causal import OutcomeCollectorService
+            from app.services.powell.tms_outcome_adapter import TmsOutcomeAdapter
+            from app.services.powell.trm_trainer import RewardCalculator
 
-            service = OutcomeCollectorService(db)
-            stats = service.collect_skill_outcomes()
+            adapter = TmsOutcomeAdapter(db=op_db)
+            service = OutcomeCollectorService(
+                db=op_db,
+                adapter=adapter,
+                reward_calculator=RewardCalculator(),
+            )
+            stats = service.collect_skill_outcomes(
+                kb_db=kb_db, operational_db=op_db,
+            )
             logger.info(
                 f"Skill outcome collection completed: "
                 f"{stats['succeeded']} computed, {stats['failed']} failed "
@@ -392,6 +406,8 @@ def _run_skill_outcome_collection() -> None:
             )
     except Exception as e:
         logger.error(f"Skill outcome collection job failed: {e}")
+    finally:
+        op_db.close()
 
 
 def _run_cdt_calibration() -> None:

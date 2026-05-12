@@ -23,45 +23,50 @@ if __name__ == "__main__":
     print(f"D1: CDC Full Loop Validation")
     print(f"{'='*60}")
 
-    # ── 1. OutcomeCollectorService import and methods ──────────────────
-    print("\n--- OutcomeCollectorService ---")
+    # ── 1. Core OutcomeCollectorService methods ───────────────────────
+    print("\n--- Core OutcomeCollectorService ---")
     try:
-        from app.services.powell.outcome_collector import OutcomeCollectorService
-        test("OutcomeCollectorService importable", True)
-    except ImportError as e:
-        test("OutcomeCollectorService importable", False, str(e))
-
-    try:
-        # collect_outcomes() moved to Core under §3.64 — exercised via
-        # the Core OutcomeCollectorService + TmsOutcomeAdapter. This
-        # legacy service now carries only the per-TRM and skill paths.
-        from azirella_data_model.governance.causal import OutcomeCollectorService as CoreOutcomeCollectorService
-        test("Core OutcomeCollectorService importable",
+        # §3.64 → §3.69: full outcome-collection arc lives in Core.
+        # Legacy plane-side outcome_collector.py was deleted under §3.69.
+        from azirella_data_model.governance.causal import (
+            OutcomeCollectorService as CoreOutcomeCollectorService,
+        )
+        test("Core OutcomeCollectorService importable", True)
+        test("Core collect_site_agent_outcomes() method exists (§3.64)",
              hasattr(CoreOutcomeCollectorService, 'collect_site_agent_outcomes'),
              "Missing Core collect_site_agent_outcomes method")
         test("Core collect_trm_outcomes() method exists (§3.66)",
              hasattr(CoreOutcomeCollectorService, 'collect_trm_outcomes'),
              "Missing Core collect_trm_outcomes method")
-        test("collect_skill_outcomes() method exists (legacy KB path)",
-             hasattr(OutcomeCollectorService, 'collect_skill_outcomes'),
-             "Missing collect_skill_outcomes method")
-    except (NameError, ImportError) as e:
+        test("Core collect_service_commitment_outcomes() exists (§3.67)",
+             hasattr(CoreOutcomeCollectorService, 'collect_service_commitment_outcomes'),
+             "Missing Core collect_service_commitment_outcomes method")
+        test("Core collect_skill_outcomes() method exists (§3.69)",
+             hasattr(CoreOutcomeCollectorService, 'collect_skill_outcomes'),
+             "Missing Core collect_skill_outcomes method")
+    except ImportError as e:
         test("Core OutcomeCollectorService importable", False, str(e))
-        test("Core collect_trm_outcomes()", False, "Class not imported")
 
     # ── 2. Outcome delays for all 11 TRM types ────────────────────────
     print("\n--- TRM Outcome Delays ---")
     try:
-        from app.services.powell.outcome_collector import TRM_OUTCOME_DELAY, OUTCOME_DELAY
+        from azirella_data_model.governance.causal import (
+            TRM_DECISION_HORIZONS as TRM_OUTCOME_DELAY,
+            SITE_AGENT_DECISION_HORIZONS as OUTCOME_DELAY,
+        )
         expected_trm_types = {
+            # 11 execution TRMs
             "atp", "rebalance", "po", "order_tracking", "mo", "to",
             "quality", "maintenance", "subcontracting",
             "forecast_adjustment", "inventory_buffer",
+            # 4 planning TRMs
+            "demand_adjustment", "inventory_adjustment",
+            "supply_adjustment", "rccp_adjustment",
         }
-        test("TRM_OUTCOME_DELAY has 11 entries",
-             len(TRM_OUTCOME_DELAY) == 11,
+        test("TRM_OUTCOME_DELAY has 15 entries (11 exec + 4 planning)",
+             len(TRM_OUTCOME_DELAY) == 15,
              f"Found {len(TRM_OUTCOME_DELAY)}: {set(TRM_OUTCOME_DELAY.keys())}")
-        test("TRM_OUTCOME_DELAY covers all 11 TRM types",
+        test("TRM_OUTCOME_DELAY covers all 15 TRM types",
              set(TRM_OUTCOME_DELAY.keys()) == expected_trm_types,
              f"Missing: {expected_trm_types - set(TRM_OUTCOME_DELAY.keys())}")
         test("SiteAgentDecision OUTCOME_DELAY has 4 entries",
