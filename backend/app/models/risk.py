@@ -1,78 +1,42 @@
-"""
-Risk Analysis Models
-Database models for risk alerts and watchlists
-Sprint 1: Enhanced Insights & Risk Analysis
+"""Risk Analysis Models — TMS re-export shim + watchlist / prediction add-ons.
+
+§3.62 Phase 3 (Risk Engine to Core): TMS's RiskAlert class was a
+copy of SCP's pre-§3.62 class against the same ``risk_alerts`` table.
+Both have been folded into Core's unified ``Alert`` ORM
+(``azirella_data_model.risk_engine.models``). TMS code that imports
+``RiskAlert`` from this module gets the Core class verbatim — table,
+columns, AIIO state machine, relationships are all the canonical
+Core versions.
+
+Watchlist and RiskPrediction stay in this module — they're tenant-
+config and ML-output respectively, not the alert surface itself
+(same scope decision as SCP took in commit ``f9e6a05f``).
+
+Historical note: TMS's RiskAlert was never produced (zero
+``db.add(RiskAlert(...))`` in the TMS codebase per the §3.62 Phase 3
+audit); the table existed via baseline_schema.sql and was only read
+by the ``risk_analysis`` endpoint stubs. The fold-down is therefore
+a clean "replace class with re-export" with no data implications.
 """
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, JSON, ForeignKey, Index
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
+from azirella_data_model.risk_engine import Alert as RiskAlert  # noqa: F401
+
 from .base import Base
-
-
-class RiskAlert(Base):
-    """
-    Risk Alert Model
-    Stores detected risks (stock-out, overstock, vendor lead time variance)
-    """
-    __tablename__ = "risk_alerts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    alert_id = Column(String(255), unique=True, nullable=False, index=True)  # SO-{product}-{site} or OS-{product}-{site}
-
-    # Alert classification
-    type = Column(String(50), nullable=False, index=True)  # STOCKOUT, OVERSTOCK, VENDOR_LEADTIME
-    severity = Column(String(20), nullable=False, index=True)  # LOW, MEDIUM, HIGH, CRITICAL
-
-    # Entity references
-    config_id = Column(Integer, ForeignKey("supply_chain_configs.id"), nullable=True)
-    product_id = Column(String(255), nullable=False, index=True)
-    site_id = Column(String(255), nullable=False, index=True)
-    vendor_id = Column(String(255), nullable=True)  # For vendor lead time alerts
-
-    # Risk metrics
-    probability = Column(Float, nullable=True)  # 0-100 for stock-out risk
-    days_until_stockout = Column(Integer, nullable=True)  # For stock-out alerts
-    days_of_supply = Column(Float, nullable=True)  # For overstock alerts
-    excess_quantity = Column(Float, nullable=True)  # For overstock alerts
-    cost_impact = Column(Float, nullable=True)  # Estimated cost impact
-
-    # Message and recommendation
-    message = Column(Text, nullable=False)
-    recommended_action = Column(Text, nullable=False)
-
-    # Risk factors (JSON)
-    factors = Column(JSON, nullable=True)  # Detailed factors contributing to risk
-
-    # AIIO status tracking
-    status = Column(String(20), default="INFORMED", index=True)  # AIIO: INFORMED, ACTIONED, INSPECTED, OVERRIDDEN
-    acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    acknowledged_at = Column(DateTime, nullable=True)
-    resolved_at = Column(DateTime, nullable=True)
-    resolution_notes = Column(Text, nullable=True)
-
-    # Condition-based resolution: what must change for auto-resolution
-    # JSON: {"metric": "stockout_probability", "operator": "lt", "threshold": 40, "description": "..."}
-    resolution_condition = Column(JSON, nullable=True)
-
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    config = relationship("SupplyChainConfig")
-    acknowledged_by_user = relationship("User", foreign_keys=[acknowledged_by])
-
-    # Indexes for performance
-    __table_args__ = (
-        Index('idx_risk_product_site', 'product_id', 'site_id'),
-        Index('idx_risk_type_severity', 'type', 'severity'),
-        Index('idx_risk_status_created', 'status', 'created_at'),
-    )
-
-    def __repr__(self):
-        return f"<RiskAlert {self.alert_id} {self.type} {self.severity}>"
 
 
 class Watchlist(Base):
