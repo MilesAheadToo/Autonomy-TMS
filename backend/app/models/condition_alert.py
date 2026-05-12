@@ -232,7 +232,10 @@ class SupplyRequest(Base):
 
     # Relationships
     tenant = relationship("Tenant")
-    condition_alert = relationship("ConditionAlert")
+    # ``condition_alert`` relationship retired with ConditionAlert
+    # (2026-05-12 — §3.62 Phase 3 follow-up). The FK column
+    # ``condition_alert_id`` is kept on this table for any
+    # pre-migration rows; callers join on it manually when needed.
 
     __table_args__ = (
         Index("ix_supply_request_requesting", "requesting_entity_type", "requesting_entity_id"),

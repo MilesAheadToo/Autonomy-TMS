@@ -9,6 +9,14 @@ Supports 4 detection rule types:
 - TREND_DETECTION: Consecutive periods of same-direction variance
 - OUTLIER_DETECTION: Statistical outlier (>N std devs from mean)
 - BIAS_DETECTION: Consistent over/under forecasting
+
+§3.62 Phase 3 follow-up (2026-05-12): the detector now DUAL-WRITES.
+Every ForecastException emitted is mirrored as a Core
+``Alert(plane=DEMAND, type=VARIANCE_RELIABILITY)`` row so the unified
+operator dashboard sees demand-variance alerts alongside SCP supply
+risks and TMS carrier-reliability alerts. The legacy
+``forecast_exception`` table + its CRUD endpoints / workflow surface
+stay live until consumers cut over.
 """
 
 import logging
@@ -19,6 +27,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
+
+from azirella_data_model.risk_engine import (
+    Alert,
+    AlertSeverity,
+    AlertStatus,
+    AlertType,
+    Plane,
+    build_resolution_condition,
+)
 
 from app.models.forecast_exception import ForecastException, ForecastExceptionRule
 from app.models.sc_entities import Forecast, OutboundOrderLine
@@ -341,8 +358,9 @@ class ForecastExceptionDetector:
         direction: str,
         severity: str,
     ) -> ForecastException:
+        exception_number = f"EXC-{uuid.uuid4().hex[:8].upper()}"
         exc = ForecastException(
-            exception_number=f"EXC-{uuid.uuid4().hex[:8].upper()}",
+            exception_number=exception_number,
             config_id=config_id,
             product_id=product_id,
             site_id=site_id,
@@ -364,7 +382,154 @@ class ForecastExceptionDetector:
             detected_at=datetime.utcnow(),
         )
         self.db.add(exc)
+
+        # §3.62 Phase 3 follow-up: emit a parallel Core Alert so the
+        # unified operator dashboard sees this demand-variance signal
+        # alongside SCP and TMS plane alerts. Failure here is logged but
+        # doesn't block the legacy ForecastException write — the CRUD
+        # surface stays the source of truth until consumers cut over.
+        try:
+            self._emit_core_alert(
+                exception_number=exception_number,
+                config_id=config_id,
+                product_id=product_id,
+                site_id=site_id,
+                period_start=period_start,
+                period_end=period_end,
+                exception_type=exc.exception_type,
+                severity=severity,
+                forecast_qty=forecast_qty,
+                actual_qty=actual_qty,
+                variance_qty=variance_qty,
+                variance_pct=variance_pct,
+                threshold_pct=getattr(rule, "variance_threshold_percent", None),
+                direction=direction,
+                detection_rule_id=getattr(rule, "id", None),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mirror ForecastException %s into Core Alert; "
+                "legacy ForecastException write still succeeded.",
+                exception_number,
+            )
+
         return exc
+
+    def _emit_core_alert(
+        self,
+        *,
+        exception_number: str,
+        config_id: Optional[int],
+        product_id: str,
+        site_id: int,
+        period_start: date,
+        period_end: date,
+        exception_type: str,
+        severity: str,
+        forecast_qty: float,
+        actual_qty: float,
+        variance_qty: float,
+        variance_pct: float,
+        threshold_pct: Optional[float],
+        direction: str,
+        detection_rule_id: Optional[int],
+    ) -> Alert:
+        """Build the Core Alert mirror for a freshly-created ForecastException."""
+        # Deterministic alert_id derived from exception_number so a
+        # repeat-detection pass (which guards against duplicate
+        # ForecastException via ``_has_existing_exception``) would
+        # also be idempotent against the Alert row if we ever change
+        # that upstream check.
+        alert_id = f"DEMAND-VARIANCE-{exception_number}"
+        message = (
+            f"Forecast variance {variance_pct:+.1f}% on product {product_id} "
+            f"at site {site_id} for {period_start}–{period_end} "
+            f"(forecast {forecast_qty:.0f}, actual {actual_qty:.0f}, "
+            f"direction={direction})."
+        )
+        if severity == "CRITICAL":
+            action = (
+                f"URGENT: Investigate root cause for product {product_id} "
+                f"at site {site_id}. Apply a manual ForecastAdjustment to "
+                f"compensate pending re-train."
+            )
+        elif severity == "HIGH":
+            action = (
+                f"Investigate variance on product {product_id} / site "
+                f"{site_id} and consider a bias-corrected ForecastAdjustment."
+            )
+        else:
+            action = (
+                f"Monitor product {product_id} at site {site_id} for "
+                f"continued variance; queue a model-feature audit if "
+                f"persistent."
+            )
+        resolution_threshold = (
+            threshold_pct if threshold_pct is not None else 20.0
+        )
+        resolution = build_resolution_condition(
+            metric="variance_percent_abs",
+            operator="lt",
+            threshold=float(resolution_threshold),
+            description=(
+                f"Auto-resolve when absolute variance drops below "
+                f"{resolution_threshold:.0f}% on the next detection pass."
+            ),
+        )
+        factors = {
+            "exception_number": exception_number,
+            "exception_type": exception_type,
+            "forecast_quantity": forecast_qty,
+            "actual_quantity": actual_qty,
+            "variance_quantity": variance_qty,
+            "variance_percent": variance_pct,
+            "threshold_percent": threshold_pct,
+            "direction": direction,
+            "period_start": period_start.isoformat() if period_start else None,
+            "period_end": period_end.isoformat() if period_end else None,
+            "detection_rule_id": detection_rule_id,
+            "detection_method": "AUTOMATED",
+        }
+        now = datetime.utcnow()
+        alert = Alert(
+            alert_id=alert_id,
+            type=AlertType.VARIANCE_RELIABILITY.value,
+            severity=severity,  # detector's ladder already aligns with AlertSeverity values
+            plane=Plane.DEMAND.value,
+            config_id=config_id,
+            product_id=str(product_id),
+            site_id=str(site_id),
+            probability=min(abs(variance_pct), 99.0),
+            message=message,
+            recommended_action=action,
+            factors=factors,
+            status=AlertStatus.INFORMED.value,
+            resolution_condition=resolution,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(alert)
+        return alert
+
+    def _resolve_core_alert(
+        self,
+        exception_number: str,
+        resolution_notes: str,
+    ) -> None:
+        """Flip the mirrored Alert to ACTIONED when its ForecastException
+        gets resolved by ``reevaluate_open_exceptions``."""
+        alert_id = f"DEMAND-VARIANCE-{exception_number}"
+        alert = (
+            self.db.query(Alert).filter(Alert.alert_id == alert_id).one_or_none()
+        )
+        if alert is None:
+            return
+        if alert.status == AlertStatus.ACTIONED.value:
+            return
+        alert.status = AlertStatus.ACTIONED.value
+        alert.resolved_at = datetime.utcnow()
+        alert.resolution_notes = resolution_notes
+        alert.updated_at = datetime.utcnow()
 
     @staticmethod
     def _severity_to_priority(severity: str) -> int:
@@ -413,15 +578,30 @@ class ForecastExceptionDetector:
 
             if abs(new_var_pct) < threshold_percent:
                 # Variance below threshold — auto-resolve
+                resolution_message = (
+                    f"Auto-resolved: variance dropped from "
+                    f"{exc.variance_percent:.1f}% to {new_var_pct:.1f}%"
+                )
                 exc.status = "resolved"
                 exc.resolution_action = "auto_resolved"
-                exc.resolution_notes = (
-                    f"Auto-resolved: variance dropped from {exc.variance_percent:.1f}% to {new_var_pct:.1f}%"
-                )
+                exc.resolution_notes = resolution_message
                 exc.variance_percent = round(new_var_pct, 1)
                 exc.resolved_at = datetime.utcnow()
                 exc.updated_at = datetime.utcnow()
                 result["resolved"] += 1
+                # Mirror the resolution onto the Core Alert (§3.62 Phase 3 follow-up).
+                try:
+                    self._resolve_core_alert(
+                        exception_number=exc.exception_number,
+                        resolution_notes=resolution_message,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to mirror auto-resolve of ForecastException %s "
+                        "onto its Core Alert; ForecastException auto-resolve "
+                        "still succeeded.",
+                        exc.exception_number,
+                    )
             else:
                 # Still above threshold — update variance
                 exc.variance_percent = round(new_var_pct, 1)
