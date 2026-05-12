@@ -332,16 +332,31 @@ def _run_outcome_collection() -> None:
 
 
 def _run_trm_outcome_collection() -> None:
-    """Collect outcomes for all 11 powell_*_decisions tables."""
+    """Collect outcomes for the 11 powell_*_decisions tables.
+
+    §3.66 adoption: this path now goes through Core's
+    ``OutcomeCollectorService.collect_trm_outcomes()`` driven by the
+    Core ``TRM_OUTCOME_SPECS`` dispatch table. The plane-side
+    :class:`TmsOutcomeAdapter` provides real-outcome reads for ATP
+    (``OutboundOrderLine``) and inventory_buffer (``InvLevel``); all
+    other TRM types use the spec's canonical stub pattern.
+    """
     from app.db.session import SessionLocal
 
-    logger.info("Starting scheduled TRM outcome collection")
+    logger.info("Starting scheduled TRM outcome collection (Core spec-driven)")
 
     db = SessionLocal()
     try:
-        from app.services.powell.outcome_collector import OutcomeCollectorService
+        from azirella_data_model.governance.causal import OutcomeCollectorService
+        from app.services.powell.tms_outcome_adapter import TmsOutcomeAdapter
+        from app.services.powell.trm_trainer import RewardCalculator
 
-        service = OutcomeCollectorService(db)
+        adapter = TmsOutcomeAdapter(db=db)
+        service = OutcomeCollectorService(
+            db=db,
+            adapter=adapter,
+            reward_calculator=RewardCalculator(),
+        )
         stats = service.collect_trm_outcomes()
         logger.info(
             f"TRM outcome collection completed: "

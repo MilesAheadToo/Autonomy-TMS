@@ -39,12 +39,15 @@ if __name__ == "__main__":
         test("Core OutcomeCollectorService importable",
              hasattr(CoreOutcomeCollectorService, 'collect_site_agent_outcomes'),
              "Missing Core collect_site_agent_outcomes method")
-        test("collect_trm_outcomes() method exists (legacy path)",
-             hasattr(OutcomeCollectorService, 'collect_trm_outcomes'),
-             "Missing collect_trm_outcomes method")
+        test("Core collect_trm_outcomes() method exists (§3.66)",
+             hasattr(CoreOutcomeCollectorService, 'collect_trm_outcomes'),
+             "Missing Core collect_trm_outcomes method")
+        test("collect_skill_outcomes() method exists (legacy KB path)",
+             hasattr(OutcomeCollectorService, 'collect_skill_outcomes'),
+             "Missing collect_skill_outcomes method")
     except (NameError, ImportError) as e:
         test("Core OutcomeCollectorService importable", False, str(e))
-        test("collect_trm_outcomes() method exists (legacy path)", False, "Class not imported")
+        test("Core collect_trm_outcomes()", False, "Class not imported")
 
     # ── 2. Outcome delays for all 11 TRM types ────────────────────────
     print("\n--- TRM Outcome Delays ---")

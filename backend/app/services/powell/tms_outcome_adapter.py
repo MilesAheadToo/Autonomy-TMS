@@ -85,14 +85,70 @@ class TmsOutcomeAdapter:
     def read_trm_outcome(
         self, trm_type: str, decision_row: Any
     ) -> Optional[Dict[str, Any]]:
-        # Per-TRM decision-table path stays in the legacy collector
-        # until §3.65. Raising NotImplementedError tells Core's
-        # ``collect_trm_outcomes`` to skip rather than misroute.
-        raise NotImplementedError(
-            "Per-TRM outcome collection is not yet migrated to Core "
-            "for TMS. See legacy outcome_collector.collect_trm_outcomes; "
-            "tracked under §3.65."
-        )
+        """§3.66: per-TRM real-integration hook.
+
+        Returns ``None`` for TRM types without real ERP wire-up; Core
+        then falls back to the canonical stub pattern in
+        :data:`TRM_OUTCOME_SPECS`. The two TMS-side cases with real
+        integration are ATP fulfilment (via ``OutboundOrderLine``)
+        and inventory_buffer (via ``InvLevel``).
+        """
+        if trm_type == "atp":
+            return self._read_real_atp_trm_outcome(decision_row)
+        if trm_type == "inventory_buffer":
+            return self._read_real_inventory_buffer_outcome(decision_row)
+        # All other TRM types: no real integration today; Core uses
+        # the canonical stub pattern.
+        return None
+
+    def _read_real_atp_trm_outcome(
+        self, decision_row: Any
+    ) -> Optional[Dict[str, Any]]:
+        """ATP per-TRM real outcome — query OutboundOrderLine."""
+        try:
+            order = self.db.query(OutboundOrderLine).filter(
+                OutboundOrderLine.order_id == decision_row.order_id,
+            ).first()
+            if not order:
+                return None
+            return {
+                "fulfilled_qty": float(order.shipped_quantity or 0),
+                "fulfillment_date": datetime.utcnow(),
+                "requested_qty": float(order.ordered_quantity or 1),
+                "was_on_time": bool(
+                    order.last_ship_date
+                    and order.promised_delivery_date
+                    and order.last_ship_date <= order.promised_delivery_date
+                ),
+                "customer_priority": 3,
+            }
+        except Exception as exc:
+            logger.debug("ATP per-TRM real-outcome read failed: %s", exc)
+            return None
+
+    def _read_real_inventory_buffer_outcome(
+        self, decision_row: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Inventory buffer per-TRM real outcome — query InvLevel."""
+        try:
+            inv = self.db.query(InvLevel).filter(
+                InvLevel.product_id == decision_row.product_id,
+            ).order_by(InvLevel.inventory_date.desc()).first()
+            if not inv:
+                return None
+            on_hand = float(inv.on_hand_qty or 0)
+            adjusted_ss = getattr(decision_row, "adjusted_ss", None) or 0
+            excess = max(0, on_hand - adjusted_ss) if adjusted_ss else 0.0
+            return {
+                "actual_stockout_occurred": on_hand <= 0,
+                "actual_dos_after": on_hand / max(adjusted_ss / 14, 1) if adjusted_ss else 0.0,
+                "service_level": 1.0 if on_hand > 0 else 0.0,
+                "excess_holding_cost": excess * 0.01,
+                "avg_inventory": on_hand,
+            }
+        except Exception as exc:
+            logger.debug("Inventory-buffer per-TRM real-outcome read failed: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Optional hooks
