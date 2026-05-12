@@ -294,17 +294,32 @@ def register_relearning_jobs(scheduler_service: 'SyncSchedulerService') -> None:
 # ---------------------------------------------------------------------------
 
 def _run_outcome_collection() -> None:
-    """Collect outcomes for TRM decisions across all sites (SiteAgentDecision path)."""
+    """Collect outcomes for TRM decisions across all sites (SiteAgentDecision path).
+
+    §3.64 adoption: this path now goes through Core's
+    ``OutcomeCollectorService`` with the plane-side
+    :class:`TmsOutcomeAdapter` providing outcome reads. The legacy
+    ``app.services.powell.outcome_collector.OutcomeCollectorService``
+    retains the per-TRM and skill paths; their migration is tracked
+    under §3.65.
+    """
     from app.db.session import SessionLocal
 
-    logger.info("Starting scheduled outcome collection")
+    logger.info("Starting scheduled outcome collection (SiteAgentDecision path)")
 
     db = SessionLocal()
     try:
-        from app.services.powell.outcome_collector import OutcomeCollectorService
+        from azirella_data_model.governance.causal import OutcomeCollectorService
+        from app.services.powell.tms_outcome_adapter import TmsOutcomeAdapter
+        from app.services.powell.trm_trainer import RewardCalculator
 
-        service = OutcomeCollectorService(db)
-        stats = service.collect_outcomes()
+        adapter = TmsOutcomeAdapter(db=db)
+        service = OutcomeCollectorService(
+            db=db,
+            adapter=adapter,
+            reward_calculator=RewardCalculator(),
+        )
+        stats = service.collect_site_agent_outcomes()
         logger.info(
             f"Outcome collection completed: "
             f"{stats['succeeded']} computed, {stats['failed']} failed "
