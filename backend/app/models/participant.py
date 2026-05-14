@@ -41,18 +41,10 @@ from .supply_chain import ScenarioUserInventory, ScenarioUserPeriod, Order  # no
 from .function_assignment import FunctionAssignment  # noqa: F401
 
 # TMS-specific relationships attached to the canonical ScenarioUser.
-ScenarioUser.inventory = relationship(
-    "ScenarioUserInventory",
-    back_populates="scenario_user",
-    lazy="selectin",
-    uselist=False,
-)
-ScenarioUser.orders = relationship(
-    "Order", back_populates="scenario_user", lazy="selectin"
-)
-ScenarioUser.scenario_user_periods = relationship(
-    "ScenarioUserPeriod", back_populates="scenario_user", lazy="selectin"
-)
+# The previously-attached `inventory`, `orders`, `scenario_user_periods`
+# back-relations now live in Core (§3.73 Step 2, 2026-05-14) because
+# their target classes were promoted to
+# `azirella_data_model.simulation.supply_chain`.
 ScenarioUser.agent_suggestions = relationship(
     "AgentSuggestion", back_populates="scenario_user", lazy="selectin"
 )

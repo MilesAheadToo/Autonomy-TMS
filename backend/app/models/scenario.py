@@ -58,9 +58,9 @@ if not hasattr(Scenario, 'current_period'):
 Scenario.scenario_users = relationship(
     "ScenarioUser", back_populates="scenario", lazy="selectin"
 )
-Scenario.supply_chain_periods = relationship(
-    "ScenarioPeriod", back_populates="scenario", lazy="selectin"
-)
+# `Scenario.supply_chain_periods` moved to Core (§3.73 Step 2,
+# 2026-05-14) because its target `ScenarioPeriod` is now in
+# `azirella_data_model.simulation.supply_chain`.
 Scenario.users = relationship(
     "User", secondary="user_scenarios", lazy="selectin"
 )
