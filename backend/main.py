@@ -641,6 +641,17 @@ async def startup_event():
             except Exception as e:
                 logger.debug(f"MCP writeback executor registration skipped: {e}")
 
+            # §3.8.2: Self-register TMS's MCP URL into every active
+            # Transport-plane registration so peer planes (SCP, DP) can
+            # discover it through the plane registry instead of
+            # hard-coded env-var config. No-ops when TMS_MCP_PUBLIC_URL
+            # is unset (deployments that don't expose MCP externally).
+            try:
+                from app.services.mcp_self_register import self_register_mcp_endpoint
+                self_register_mcp_endpoint(sync_session_factory)
+            except Exception as e:
+                logger.warning("§3.8.2 TMS MCP self-registration skipped: %s", e)
+
             # CDT startup: load existing calibration from DB into memory.
             # Fast (< 5s) — reads decision-outcome pairs already stored.
             # Simulation bootstrap only runs during provisioning (conformal step)
