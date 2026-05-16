@@ -18,6 +18,22 @@ from ...models.sc_entities import Forecast
 from ...models.user import User
 from app.api.deps import get_current_user
 
+# §3.62 — Core ``Alert`` is the unified plane-tagged alert ORM.
+# `forecast_exception_detector` dual-writes a mirror row with
+# ``plane=DEMAND, type=VARIANCE_RELIABILITY`` for every
+# ForecastException; this endpoint can opt into reading from it via
+# ``?source=alert``. Default stays ``legacy`` until the cutover soaks.
+from azirella_data_model.risk_engine import (
+    Alert,
+    AlertStatus,
+    AlertType,
+    Plane,
+)
+from .forecast_exceptions_alert_mapper import (
+    alert_status_to_legacy as _alert_status_to_legacy,
+    alert_to_legacy_dict as _alert_to_legacy_dict,
+)
+
 router = APIRouter(prefix="/forecast-exceptions", tags=["Forecast Exceptions"])
 
 
@@ -120,8 +136,43 @@ def list_exceptions(
     period_end: Optional[date] = None,
     skip: int = 0,
     limit: int = 100,
+    # §3.62 — read-source toggle. ``legacy`` (default) reads the
+    # ForecastException table; ``alert`` reads Core Alert filtered by
+    # ``plane=DEMAND, type=VARIANCE_RELIABILITY``. The dual-write
+    # contract keeps both in sync. Default stays ``legacy`` until the
+    # cutover has soaked.
+    source: str = Query(
+        "legacy",
+        regex="^(legacy|alert)$",
+        description="Read source: 'legacy' (ForecastException table) or "
+                    "'alert' (Core Alert table, §3.62 cutover).",
+    ),
 ):
-    """List forecast exceptions with filtering"""
+    """List forecast exceptions with filtering.
+
+    ``source=alert`` switches the read path to Core Alert
+    (§3.62). The dual-write contract in
+    ``forecast_exception_detector._emit_core_alert`` keeps both
+    tables in sync; this endpoint can transparently swap sources
+    without affecting write paths. Workflow surface (assign /
+    escalate / acknowledge / resolve) still operates on the legacy
+    table — those write endpoints will cut over in a follow-up.
+    """
+    if source == "alert":
+        return _list_exceptions_from_alert(
+            db=db,
+            config_id=config_id,
+            tenant_id=tenant_id,
+            product_id=product_id,
+            site_id=site_id,
+            severity=severity,
+            status=status,
+            period_start=period_start,
+            period_end=period_end,
+            skip=skip,
+            limit=limit,
+        )
+
     query = db.query(ForecastException)
 
     if config_id:
@@ -176,6 +227,84 @@ def list_exceptions(
         "total": total,
         "items": items,
     }
+
+
+def _list_exceptions_from_alert(
+    *,
+    db: Session,
+    config_id: Optional[int],
+    tenant_id: Optional[int],
+    product_id: Optional[str],
+    site_id: Optional[int],
+    severity: Optional[str],
+    status: Optional[str],
+    period_start: Optional[date],
+    period_end: Optional[date],
+    skip: int,
+    limit: int,
+) -> dict:
+    """§3.62 read cutover — query Core Alert and shape into legacy response."""
+    query = db.query(Alert).filter(
+        Alert.plane == Plane.DEMAND.value,
+        Alert.type == AlertType.VARIANCE_RELIABILITY.value,
+    )
+    if config_id is not None:
+        query = query.filter(Alert.config_id == config_id)
+    if product_id:
+        query = query.filter(Alert.product_id == product_id)
+    if site_id is not None:
+        # Alert.site_id is String(255); compare as string.
+        query = query.filter(Alert.site_id == str(site_id))
+    if severity:
+        query = query.filter(Alert.severity == severity)
+    if status:
+        # Caller passes legacy status (NEW/INVESTIGATING/RESOLVED). Translate
+        # to the Alert timestamp shape; ``ACTIONED``/``OVERRIDDEN`` callers
+        # using the AIIO vocabulary directly are supported too.
+        legacy_to_alert_clauses = {
+            "NEW": and_(
+                Alert.acknowledged_at.is_(None),
+                Alert.resolved_at.is_(None),
+            ),
+            "INVESTIGATING": and_(
+                Alert.acknowledged_at.isnot(None),
+                Alert.resolved_at.is_(None),
+            ),
+            "RESOLVED": Alert.resolved_at.isnot(None),
+        }
+        clause = legacy_to_alert_clauses.get(status)
+        if clause is not None:
+            query = query.filter(clause)
+        else:
+            # Pass-through for raw AIIO state.
+            query = query.filter(Alert.status == status)
+    if period_start:
+        # ``period_start`` lives in factors JSON. Use PostgreSQL's ->> for
+        # case-by-case string comparison; the ISO format sorts
+        # lexicographically so >= works against the period_start date.
+        query = query.filter(
+            Alert.factors["period_start"].astext >= period_start.isoformat()
+        )
+    if period_end:
+        query = query.filter(
+            Alert.factors["period_end"].astext <= period_end.isoformat()
+        )
+
+    total = query.count()
+    alerts = (
+        query.order_by(Alert.severity.desc(), Alert.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    # Resolve tenant_id once per call (Alert rows don't carry it directly).
+    # Use the caller-supplied tenant_id when present; otherwise pass None
+    # — frontends typically scope by tenant via auth, not by URL filter.
+    items = [
+        _alert_to_legacy_dict(alert=a, tenant_id=tenant_id) for a in alerts
+    ]
+    return {"total": total, "items": items, "source": "alert"}
 
 
 @router.get("/summary")
