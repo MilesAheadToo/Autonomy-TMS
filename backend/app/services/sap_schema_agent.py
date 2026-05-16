@@ -787,62 +787,62 @@ class SAPSchemaAgent:
     async def _resolve_with_llm(self, ambiguous_matches: List[FieldMatch]):
         """Use LLM to resolve ambiguous field matches.
 
-        For each ambiguous match, ask the LLM to reason about which candidate
-        is the correct SAP field based on field descriptions and context.
+        Routes through Core's ``azirella_assistant.OpenAICompatibleClient``
+        substrate (§3.16) — direct HTTP calls to the OpenAI-compat
+        chat endpoint are not allowed outside the substrate.
         """
         try:
-            import httpx
-
-            llm_base = os.getenv("LLM_API_BASE", "http://localhost:11434/v1")
-            llm_key = os.getenv("LLM_API_KEY", "not-needed")
-            llm_model = os.getenv("LLM_MODEL_NAME", "qwen3-8b")
-
-            for fm in ambiguous_matches:
-                if not fm.candidates or len(fm.candidates) < 2:
-                    continue
-
-                prompt = self._build_llm_prompt(fm)
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        resp = await client.post(
-                            f"{llm_base}/chat/completions",
-                            headers={"Authorization": f"Bearer {llm_key}"},
-                            json={
-                                "model": llm_model,
-                                "messages": [
-                                    {"role": "system", "content": (
-                                        "You are an SAP technical consultant. Given an expected field "
-                                        "and multiple candidate SAP fields, determine which candidate "
-                                        "is the best match. Reply with ONLY the field name of the best "
-                                        "match, nothing else."
-                                    )},
-                                    {"role": "user", "content": prompt},
-                                ],
-                                "temperature": 0.1,
-                                "max_tokens": 50,
-                            },
-                        )
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            answer = data["choices"][0]["message"]["content"].strip().upper()
-                            # Remove /think tags if present (qwen3)
-                            answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL).strip().upper()
-
-                            # Find the matching candidate
-                            for cand in fm.candidates:
-                                if cand["field"].upper() == answer:
-                                    fm.matched_table = cand["table"]
-                                    fm.matched_field = cand["field"]
-                                    fm.confidence = min(cand["combined"] + 0.10, 0.92)
-                                    fm.match_type = MatchType.LLM_RESOLVED
-                                    fm.description = cand.get("description", "")
-                                    break
-
-                except Exception as e:
-                    logger.debug(f"LLM resolution failed for {fm.expected_field}: {e}")
-
+            from azirella_assistant import (
+                ChatMessage,
+                OpenAICompatibleClient,
+                Workload,
+            )
         except ImportError:
-            logger.debug("httpx not available for LLM resolution, skipping")
+            logger.debug(
+                "azirella_assistant not available for LLM resolution, skipping"
+            )
+            return
+
+        client = OpenAICompatibleClient(workload=Workload.CHAT)
+        for fm in ambiguous_matches:
+            if not fm.candidates or len(fm.candidates) < 2:
+                continue
+
+            prompt = self._build_llm_prompt(fm)
+            try:
+                resp = await client.complete(
+                    messages=[
+                        ChatMessage(role="system", content=(
+                            "You are an SAP technical consultant. Given an expected field "
+                            "and multiple candidate SAP fields, determine which candidate "
+                            "is the best match. Reply with ONLY the field name of the best "
+                            "match, nothing else."
+                        )),
+                        ChatMessage(role="user", content=prompt),
+                    ],
+                    temperature=0.1,
+                    max_tokens=50,
+                )
+                answer = (resp.content or "").strip().upper()
+                # Remove <think> tags if present (qwen3)
+                answer = re.sub(
+                    r"<think>.*?</think>", "", answer, flags=re.DOTALL
+                ).strip().upper()
+
+                # Find the matching candidate
+                for cand in fm.candidates:
+                    if cand["field"].upper() == answer:
+                        fm.matched_table = cand["table"]
+                        fm.matched_field = cand["field"]
+                        fm.confidence = min(cand["combined"] + 0.10, 0.92)
+                        fm.match_type = MatchType.LLM_RESOLVED
+                        fm.description = cand.get("description", "")
+                        break
+
+            except Exception as e:
+                logger.debug(
+                    f"LLM resolution failed for {fm.expected_field}: {e}"
+                )
 
     def _build_llm_prompt(self, fm: FieldMatch) -> str:
         """Build a prompt for LLM field resolution."""

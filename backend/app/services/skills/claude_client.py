@@ -1,9 +1,43 @@
 """
-Thin Claude API client with vLLM/Qwen fallback.
+Thin adapter around ``azirella_assistant.LLMClient`` with runtime
+provider switching, vLLM context capping, and Qwen3 ``<think>``
+stripping retained.
 
-Checks CLAUDE_API_KEY env var for Anthropic API access.
-Falls back to existing vLLM/Qwen via LLM_API_BASE if not set.
-Supports prompt caching for static SKILL.md instructions.
+Migration §3.16 (2026-05-16): every call to an LLM transport now
+routes through Core's substrate
+(``azirella_assistant.AnthropicClient`` /
+``azirella_assistant.OpenAICompatibleClient``) per CLAUDE.md "LLM
+usage discipline". The previous direct-httpx implementation is
+gone.
+
+Features this adapter retains over a bare ``LLMClient``:
+
+  * **Runtime provider switching** — reads
+    ``backend/data/llm_settings.json`` at call time so the admin UI
+    can flip between Claude / vLLM without a restart. Field name
+    is ``briefing_provider`` or ``skills_provider`` per
+    ``purpose=`` constructor arg.
+  * **vLLM ``max_model_len`` discovery + context capping** — queries
+    ``/v1/models`` once + caches; truncates input + caps
+    ``max_tokens`` so context-length limits don't blow up briefings.
+  * **Qwen3 ``<think>...</think>`` stripping** — post-processes
+    vLLM responses so the residual reasoning blocks don't leak
+    through to callers.
+  * **``model_tier`` abstraction** — ``"haiku"`` / ``"sonnet"`` →
+    actual model name, with the vLLM fallback when Claude isn't
+    selected.
+  * **JSON-from-markdown helper** — ``parse_json_response`` strips
+    `````json`` fences.
+
+What this adapter no longer does (handled by the substrate):
+
+  * Building the HTTP request bodies for Anthropic Messages /
+    OpenAI Chat Completions.
+  * Anthropic prompt-caching wire format — the substrate's
+    ``AnthropicClient`` already wraps the system prompt in a
+    cached block.
+  * Token-usage extraction — the substrate's ``LLMResponse.raw``
+    carries the provider's untouched response.
 """
 
 from __future__ import annotations
@@ -11,10 +45,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re as _re
 import time
 from typing import Any, Optional
 
 import httpx
+
+from azirella_assistant import (
+    AnthropicClient,
+    ChatMessage,
+    OpenAICompatibleClient,
+    Workload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +74,13 @@ ENV_LLM_MODEL_NAME = "LLM_MODEL_NAME"
 
 
 class ClaudeClient:
-    """
-    Unified LLM client that routes to Claude API or vLLM fallback.
+    """Routes LLM calls through Core's
+    :class:`azirella_assistant.LLMClient` substrate while preserving
+    SCP-specific features (runtime provider switching, vLLM context
+    capping, Qwen3 ``<think>`` stripping).
 
     Usage:
-        client = ClaudeClient()
+        client = ClaudeClient(purpose="briefing")
         response = await client.complete(
             system_prompt="You are an ATP decision agent...",
             user_message=json.dumps(state_features),
@@ -56,10 +100,17 @@ class ClaudeClient:
         self._llm_model_name = os.getenv(ENV_LLM_MODEL_NAME, "qwen3-8b")
         self._haiku_model = os.getenv(ENV_CLAUDE_MODEL_HAIKU, CLAUDE_HAIKU)
         self._sonnet_model = os.getenv(ENV_CLAUDE_MODEL_SONNET, CLAUDE_SONNET)
-        self._http_client: Optional[httpx.AsyncClient] = None
         self._force_vllm = force_vllm  # bypass Anthropic API even if CLAUDE_API_KEY is set
         self._purpose = purpose  # "briefing" or "skills"
-        self._vllm_max_model_len: Optional[int] = None  # cached from /v1/models
+        # Substrate clients are instantiated lazily so process startup
+        # isn't paying the import cost when this adapter is unused.
+        # Each call resolves the right client based on `uses_claude`.
+        self._anthropic: Optional[AnthropicClient] = None
+        self._vllm: Optional[OpenAICompatibleClient] = None
+        # vLLM context-capping helpers stay here (the substrate
+        # doesn't model context-length awareness today).
+        self._meta_http: Optional[httpx.AsyncClient] = None
+        self._vllm_max_model_len: Optional[int] = None
 
     @property
     def uses_claude(self) -> bool:
@@ -108,10 +159,28 @@ class ClaudeClient:
             pass
         return "auto"
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=120.0)
-        return self._http_client
+    def _get_anthropic(self) -> AnthropicClient:
+        if self._anthropic is None:
+            workload = (
+                Workload.NARRATION if self._purpose == "briefing"
+                else Workload.CHAT
+            )
+            self._anthropic = AnthropicClient(workload=workload)
+        return self._anthropic
+
+    def _get_vllm(self) -> OpenAICompatibleClient:
+        if self._vllm is None:
+            workload = (
+                Workload.NARRATION if self._purpose == "briefing"
+                else Workload.CHAT
+            )
+            self._vllm = OpenAICompatibleClient(
+                workload=workload,
+                base_url=self._llm_api_base,
+                api_key=self._llm_api_key,
+                model=self._llm_model_name,
+            )
+        return self._vllm
 
     def _resolve_model(self, model_tier: str) -> str:
         """Resolve model tier to actual model identifier."""
@@ -130,7 +199,7 @@ class ClaudeClient:
         max_tokens: int = 1024,
     ) -> dict[str, Any]:
         """
-        Send a completion request to Claude API or vLLM fallback.
+        Send a completion request through Core's LLMClient substrate.
 
         Args:
             system_prompt: The SKILL.md content + RAG context
@@ -175,45 +244,48 @@ class ClaudeClient:
         temperature: float,
         max_tokens: int,
     ) -> dict[str, Any]:
-        """Call Anthropic Messages API with prompt caching."""
-        client = await self._get_client()
-        response = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": os.getenv(ENV_CLAUDE_API_KEY, ""),
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": "prompt-caching-2024-07-31",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "system": [
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                "messages": [{"role": "user", "content": user_message}],
-            },
+        """Call Anthropic Messages API via Core's AnthropicClient.
+
+        The substrate handles prompt-caching wire format
+        (``cache_control: ephemeral`` on the system block) — this
+        adapter just supplies the messages + model override + decoding.
+        """
+        client = self._get_anthropic()
+        response = await client.complete(
+            messages=[
+                ChatMessage(role="system", content=system_prompt),
+                ChatMessage(role="user", content=user_message),
+            ],
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
-        response.raise_for_status()
-        data = response.json()
-        content = data["content"][0]["text"] if data.get("content") else ""
-        usage = data.get("usage", {})
-        tokens = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        content = response.content or ""
+        # Token usage isn't on LLMResponse directly; read from raw.
+        raw = response.raw or {}
+        usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
+        tokens = (
+            int(usage.get("input_tokens", 0) or 0)
+            + int(usage.get("output_tokens", 0) or 0)
+        )
         return {"content": content, "model": model, "tokens_used": tokens}
 
     async def _get_vllm_max_model_len(self) -> int:
-        """Query vLLM /v1/models to get the served model's max_model_len. Cached."""
+        """Query vLLM /v1/models to get the served model's max_model_len.
+
+        The substrate's :class:`OpenAICompatibleClient` doesn't expose
+        the model's context-length limit (it's a vLLM-specific
+        diagnostic, not part of the chat-completions API). Keep the
+        ``/v1/models`` query here so vLLM-served briefings don't blow
+        their context window.
+        """
         if self._vllm_max_model_len is not None:
             return self._vllm_max_model_len
         try:
-            client = await self._get_client()
-            base = self._llm_api_base.rstrip("/")
-            resp = await client.get(
+            if self._meta_http is None or self._meta_http.is_closed:
+                self._meta_http = httpx.AsyncClient(timeout=5.0)
+            base = self._llm_api_base.rstrip("/") if self._llm_api_base else ""
+            resp = await self._meta_http.get(
                 f"{base}/models",
                 headers={"Authorization": f"Bearer {self._llm_api_key}"},
                 timeout=5.0,
@@ -241,9 +313,13 @@ class ClaudeClient:
         temperature: float,
         max_tokens: int,
     ) -> dict[str, Any]:
-        """Call vLLM/Ollama via OpenAI-compatible API."""
-        client = await self._get_client()
-        base = self._llm_api_base.rstrip("/")
+        """Call vLLM/Ollama via Core's OpenAICompatibleClient.
+
+        Caps inputs to fit vLLM's ``max_model_len`` (queried out-of-band
+        via :meth:`_get_vllm_max_model_len`) and strips Qwen3
+        ``<think>...</think>`` blocks from the response.
+        """
+        client = self._get_vllm()
 
         # Respect the model's max_model_len: cap max_tokens and truncate inputs.
         # Conservative estimate: JSON/structured text ≈ 2.5 chars/token (not 4).
@@ -268,37 +344,34 @@ class ClaudeClient:
                 max_model_len, sys_chars, usr_chars, capped_max_tokens,
             )
 
-        response = await client.post(
-            f"{base}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._llm_api_key}",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "temperature": temperature,
-                "max_tokens": capped_max_tokens,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-            },
+        response = await client.complete(
+            messages=[
+                ChatMessage(role="system", content=system_prompt),
+                ChatMessage(role="user", content=user_message),
+            ],
+            model=model,
+            max_tokens=capped_max_tokens,
+            temperature=temperature,
         )
-        response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"] if data.get("choices") else ""
-        # Strip any residual Qwen3 <think>...</think> blocks that sneak through
-        import re as _re
-        content = _re.sub(r'<think>.*?</think>', '', content, flags=_re.DOTALL).strip()
-        usage = data.get("usage", {})
-        tokens = usage.get("total_tokens", 0)
+        content = response.content or ""
+        # Strip any residual Qwen3 <think>...</think> blocks that sneak through.
+        content = _re.sub(r"<think>.*?</think>", "", content, flags=_re.DOTALL).strip()
+        # Token-usage from the raw response.
+        raw = response.raw or {}
+        usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
+        tokens = int(usage.get("total_tokens", 0) or 0)
         return {"content": content, "model": model, "tokens_used": tokens}
 
     async def close(self):
-        """Close the HTTP client."""
-        if self._http_client and not self._http_client.is_closed:
-            await self._http_client.aclose()
+        """Release the metadata HTTP client. The substrate clients
+        manage their own lifecycle."""
+        if self._meta_http and not self._meta_http.is_closed:
+            await self._meta_http.aclose()
+        if self._anthropic is not None:
+            try:
+                await self._anthropic.aclose()
+            except Exception:
+                pass
 
     def parse_json_response(self, content: str) -> dict[str, Any]:
         """
