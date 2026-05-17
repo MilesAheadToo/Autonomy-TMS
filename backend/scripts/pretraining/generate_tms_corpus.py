@@ -60,7 +60,7 @@ from autonomy_tms_heuristics.library.secondary_teachers import (
 from autonomy_tms_heuristics.library.base import (
     CapacityPromiseState,
     ShipmentTrackingState,
-    DemandSensingState,
+    LoadVolumeSensingState,
     CapacityBufferState,
     ExceptionManagementState,
     FreightProcurementState,
@@ -244,10 +244,10 @@ def _sample_shipment_tracking(rng: random.Random) -> ShipmentTrackingState:
     )
 
 
-def _sample_demand_sensing(rng: random.Random) -> DemandSensingState:
+def _sample_load_volume_sensing(rng: random.Random) -> LoadVolumeSensingState:
     forecast = rng.uniform(5, 100)
     actual = forecast * rng.uniform(0.5, 1.5)
-    return DemandSensingState(
+    return LoadVolumeSensingState(
         lane_id=rng.randint(1, 50),
         forecast_loads=forecast,
         forecast_mape=rng.uniform(0.05, 0.40),
@@ -608,7 +608,7 @@ def _sample_lane_volume_forecast(rng: random.Random) -> LaneVolumeForecastState:
 SAMPLERS = {
     "capacity_promise": (_sample_capacity_promise, CapacityPromiseState),
     "shipment_tracking": (_sample_shipment_tracking, ShipmentTrackingState),
-    "demand_sensing": (_sample_demand_sensing, DemandSensingState),
+    "load_volume_sensing": (_sample_load_volume_sensing, LoadVolumeSensingState),
     "capacity_buffer": (_sample_capacity_buffer, CapacityBufferState),
     "exception_management": (_sample_exception_management, ExceptionManagementState),
     "freight_procurement": (_sample_freight_procurement, FreightProcurementState),

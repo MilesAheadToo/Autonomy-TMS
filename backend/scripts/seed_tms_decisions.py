@@ -47,7 +47,7 @@ from app.models.supply_chain_config import Site, TransportationLane
 from autonomy_tms_heuristics.library.base import (
     CapacityPromiseState,
     ShipmentTrackingState,
-    DemandSensingState,
+    LoadVolumeSensingState,
     CapacityBufferState,
     ExceptionManagementState,
     FreightProcurementState,
@@ -466,7 +466,7 @@ def seed_demand_sensing_decisions(session, tenant_id: int, config_id: int) -> in
     today = date.today()
     for i, lane in enumerate(lanes[:target]):
         item_code = f"DEMAND-LANE-{lane.lane_id}-WK{today.isocalendar()[1]}"
-        if _decision_exists(session, tenant_id, DecisionType.DEMAND_SENSING, item_code):
+        if _decision_exists(session, tenant_id, DecisionType.LOAD_VOLUME_SENSING, item_code):
             continue
 
         forecast = by_lane.get(lane.lane_id)
@@ -479,7 +479,7 @@ def seed_demand_sensing_decisions(session, tenant_id: int, config_id: int) -> in
         signal_candidates = ["VOLUME_SURGE", "SEASONAL_SHIFT", "PROMOTION", "WEATHER_IMPACT", ""]
         signal_type = signal_candidates[i % len(signal_candidates)]
 
-        state = DemandSensingState(
+        state = LoadVolumeSensingState(
             lane_id=lane.lane_id,
             period_start=today,
             period_days=7,
@@ -497,7 +497,7 @@ def seed_demand_sensing_decisions(session, tenant_id: int, config_id: int) -> in
             is_peak_season=(i % 3 == 0),
         )
 
-        decision = compute_tms_decision("demand_sensing", state)
+        decision = compute_tms_decision("load_volume_sensing", state)
         lane_name = _lane_label(session, lane)
 
         recommendation_map = {
@@ -511,7 +511,7 @@ def seed_demand_sensing_decisions(session, tenant_id: int, config_id: int) -> in
 
         session.add(_build_agent_decision(
             tenant_id=tenant_id,
-            decision_type=DecisionType.DEMAND_SENSING,
+            decision_type=DecisionType.LOAD_VOLUME_SENSING,
             item_code=item_code,
             item_name=lane_name,
             category="forecast",

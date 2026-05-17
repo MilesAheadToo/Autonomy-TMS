@@ -53,7 +53,7 @@ ACTION_NAMES = {
 NUM_ACTIONS = len(ACTION_NAMES)
 
 ALL_TRMS = [
-    "capacity_promise", "shipment_tracking", "demand_sensing",
+    "capacity_promise", "shipment_tracking", "load_volume_sensing",
     "capacity_buffer", "exception_management", "freight_procurement",
     "broker_routing", "dock_scheduling", "load_build",
     "intermodal_transfer", "equipment_reposition",
