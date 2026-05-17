@@ -29,23 +29,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set working directory
 WORKDIR /app
 
+# Build context: repository root (see docker-compose.yml backend.build.context).
+# This lets the Dockerfile COPY both `backend/` and `packages/` directly —
+# `autonomy-tms-heuristics` is TMS's own subpackage and is installed from
+# the local working tree below, eliminating a remote git fetch + a needless
+# PAT-scope dependency.
+COPY backend/requirements.txt /app/requirements.txt
+COPY packages/autonomy-tms-heuristics /app/packages/autonomy-tms-heuristics
+
 # Install Python dependencies — including azirella-data-model from the private
 # Autonomy-Core monorepo. The fine-grained GitHub PAT is mounted as a BuildKit
 # secret (id=autonomy_core_token), written to a temporary .netrc for git to
 # authenticate the clone, and cleaned up after pip finishes. The token never
 # lands in any image layer — secrets are tmpfs-only.
-COPY requirements.txt .
 RUN --mount=type=secret,id=autonomy_core_token,required=true \
     printf "machine github.com\nlogin x-access-token\npassword $(cat /run/secrets/autonomy_core_token)\n" > /root/.netrc && \
     chmod 600 /root/.netrc && \
     pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -e /app/packages/autonomy-tms-heuristics && \
     rm -f /root/.netrc
 
 # Install CPU-only PyTorch
 # Rely on torch version pinned in requirements.txt (2.x) to avoid older wheels needing executable stacks
 
-# Copy the current directory contents into the container at /app
-COPY . .
+# Copy the backend source last so code changes don't bust the deps-install layer.
+COPY backend/ /app/
 
 # Make scripts executable
 RUN chmod +x /app/startup.sh /app/init-db.sh && \

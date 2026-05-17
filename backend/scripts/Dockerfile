@@ -10,16 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install with BuildKit secret for private repo auth
-COPY requirements.txt .
+# Build context: repository root (see backend/Dockerfile.cpu rationale).
+# Copy requirements + heuristics package locally before pip install.
+COPY backend/requirements.txt /app/requirements.txt
+COPY packages/autonomy-tms-heuristics /app/packages/autonomy-tms-heuristics
+
 RUN --mount=type=secret,id=autonomy_core_token,required=true \
     printf "machine github.com\nlogin x-access-token\npassword $(cat /run/secrets/autonomy_core_token)\n" > /root/.netrc && \
     chmod 600 /root/.netrc && \
     pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -e /app/packages/autonomy-tms-heuristics && \
     rm -f /root/.netrc
 
-# Copy the application code
-COPY . .
+# Copy the backend application code
+COPY backend/ /app/
 
 # Set environment variables
 ENV PYTHONPATH=/app

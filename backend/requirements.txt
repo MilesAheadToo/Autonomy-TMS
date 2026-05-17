@@ -19,14 +19,17 @@ azirella-heuristics-common @ git+https://github.com/azirella-ltd/Autonomy-Core.g
 # GNN-6 in TMS_POWELL_GNN_REWRITE.md; without it the TMS-shape heads
 # can't be built. ``gnn`` extra pulls torch + torch-geometric.
 azirella-powell-core[gnn,scheduler] @ git+https://github.com/azirella-ltd/Autonomy-Core.git@8c6cd00#subdirectory=packages/powell-core
-# autonomy-tms-heuristics — single authoritative source of TMS conservative-
-# default heuristic math (PR-LOCK, 2026-05-04, §3.52). Used by (1) internal
-# TRM runtime fallback via compute_tms_decision, (2) BC training-corpus
-# labels, (3) cross-plane HEURISTIC-tier dispatch. Editable install for
-# in-repo dev; flip to a git pin
-# (autonomy-tms-heuristics @ git+https://github.com/azirella-ltd/Autonomy-TMS.git@<merge-sha>#subdirectory=packages/autonomy-tms-heuristics)
-# in a follow-up PR once all in-flight TMS PRs land.
--e ./packages/autonomy-tms-heuristics
+# autonomy-tms-heuristics is NOT listed here — it's TMS's own subpackage and
+# is installed from the local working tree by callers:
+#   - Dockerfile.cpu / Dockerfile.gpu / Dockerfile.prod / scripts/Dockerfile:
+#     `pip install -e /app/packages/autonomy-tms-heuristics` after the
+#     requirements.txt install (root-context build, see Dockerfile.cpu).
+#   - Local dev: `pip install -e ./packages/autonomy-tms-heuristics` from repo root.
+# A `-e ./packages/...` line here was previously a no-op at build time —
+# the path resolves relative to /app inside the container, but with the
+# pre-2026-05-17 `context: ./backend` Docker setup the packages dir was
+# outside the build context. The root-context restructure (2026-05-17)
+# moved the install to a discrete Dockerfile step.
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0

@@ -41,8 +41,14 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile.cpu
+      # Build context is the repo root so the Dockerfile can COPY both
+      # `backend/` and `packages/autonomy-tms-heuristics/` — TMS's own
+      # subpackage is installed locally rather than fetched via remote
+      # git. Pre-2026-05-17 this was `context: ./backend`, which excluded
+      # `packages/` from the context and silently broke the build on a
+      # fresh clone.
+      context: .
+      dockerfile: backend/Dockerfile.cpu
       secrets:
         - autonomy_core_token
     container_name: autonomy-tms-backend
@@ -220,8 +226,8 @@ services:
 
   create-users:
     build:
-      context: ./backend
-      dockerfile: scripts/Dockerfile
+      context: .
+      dockerfile: backend/scripts/Dockerfile
       secrets:
         - autonomy_core_token
     container_name: autonomy-tms-create-users
@@ -240,8 +246,8 @@ services:
 
   mcp-server:
     build:
-      context: ./backend
-      dockerfile: Dockerfile.cpu
+      context: .
+      dockerfile: backend/Dockerfile.cpu
     container_name: autonomy-tms-mcp-server
     restart: unless-stopped
     env_file:
