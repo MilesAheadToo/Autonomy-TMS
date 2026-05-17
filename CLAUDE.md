@@ -3,6 +3,14 @@
 Project rules for Claude Code. Detailed architecture in
 [docs/CLAUDE_REFERENCE.md](docs/CLAUDE_REFERENCE.md).
 
+## CRITICAL: Pre-launch — always make the right architectural decision
+
+**Autonomy is not yet live in production.** When a placement, design, or dependency decision presents a tradeoff between (a) the architecturally-correct shape and (b) the locally-expedient shortcut, **always choose (a)**. The right shape now is cheaper than the right shape later, and the cost of "later" is exactly what this directive prevents accumulating.
+
+No "for now" placements, no PAT / scope widening to mask misplaced deps, no "merge it green and circle back" on CI failures that reveal architectural smells, no defaulting to `MIGRATION_REGISTER.md` as a parking lot. This directive sits above every other rule in this file and is mirrored from `Autonomy-Core/CLAUDE.md`. If any rule conflicts with it, this one wins.
+
+---
+
 > Cross-product engineering rules (placement, AWS SC DM, SOC II, AIIO,
 > terminology, plan separation, planning cascade, hierarchy drilldown,
 > governance, AATP) are defined in `Autonomy-Core/CLAUDE.md`. This repo
