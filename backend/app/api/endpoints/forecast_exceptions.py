@@ -139,13 +139,16 @@ def list_exceptions(
     # §3.62 — read-source toggle. ``legacy`` (default) reads the
     # ForecastException table; ``alert`` reads Core Alert filtered by
     # ``plane=DEMAND, type=VARIANCE_RELIABILITY``. The dual-write
-    # contract keeps both in sync. Default stays ``legacy`` until the
-    # cutover has soaked.
+    # contract keeps both in sync. Default flipped legacy → alert
+    # 2026-05-18 after the 2026-05-16 opt-in soaked without complaints.
+    # ``source=legacy`` still works for one release as an escape hatch
+    # before the legacy read path is deleted in §3.62 follow-up.
     source: str = Query(
-        "legacy",
+        "alert",
         regex="^(legacy|alert)$",
-        description="Read source: 'legacy' (ForecastException table) or "
-                    "'alert' (Core Alert table, §3.62 cutover).",
+        description="Read source: 'alert' (Core Alert table, §3.62 cutover; "
+                    "default 2026-05-18+) or 'legacy' (ForecastException "
+                    "table; deprecated, removed in next §3.62 follow-up).",
     ),
 ):
     """List forecast exceptions with filtering.
