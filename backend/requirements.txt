@@ -1,15 +1,20 @@
 absl-py==2.3.1
 aiofiles==0.7.0
-azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@b8b424d#subdirectory=packages/data-model
-# bumped 2026-05-18 (second time today): 03aa884 → b8b424d. Picks up
-# Commodity + CommodityHierarchy in azirella_data_model.master.commodity
-# (Core b8b424d, §3.79 Substep 1a). TMS's backend/app/models/tms_entities.py
-# is a re-export shim from that commit onwards. Prior bump 03aa884 (from
-# d7900be) brought in the ScenarioUser promotion (Core 1ce100f, 2026-05-13)
-# that TMS's backend/app/models/participant.py needed.
-# NB: ShippingForecast was briefly lifted to Core at 7250a80 then reverted
-# (§3.79 Substep 1 correction): ShippingForecast belongs in apps/dp-ship/,
-# not Core. Do not re-bump past b8b424d expecting it in Core.
+azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@86769e0#subdirectory=packages/data-model
+# bumped 2026-05-18 (third time today): b8b424d → 86769e0. Picks up
+# the 3 visibility signal types (LATE_ARRIVAL_DETECTED,
+# DWELL_BREACH_ALERT, GEOFENCE_DEPARTED_EARLY) + VISIBILITY_SIGNALS
+# frozenset in azirella_data_model.powell.HiveSignalType (Core
+# 86769e0, §3.49 TMS-side adoption close). TMS's
+# backend/app/services/powell/hive_signal.py collapsed to a Core
+# re-export shim alongside this pin bump.
+# Earlier same-day bump (b8b424d, from 03aa884) brought in Commodity
+# + CommodityHierarchy in azirella_data_model.master.commodity for
+# §3.79 Substep 1a — TMS's tms_entities.py is a re-export shim for
+# both classes since that commit.
+# NB: ShippingForecast was briefly lifted to Core at 7250a80 then
+# reverted (§3.79 Substep 1 correction): ShippingForecast belongs in
+# apps/dp-ship/, not Core. Do not re-bump expecting it.
 azirella-integrations @ git+https://github.com/azirella-ltd/Autonomy-Core.git@8c6cd00#subdirectory=packages/integrations
 azirella-demand-planning-contract @ git+https://github.com/azirella-ltd/Autonomy-Core.git@8c6cd00#subdirectory=packages/demand-planning-contract
 azirella-transfer-order-envelope-contract @ git+https://github.com/azirella-ltd/Autonomy-Core.git@8c6cd00#subdirectory=packages/transfer-order-envelope-contract
