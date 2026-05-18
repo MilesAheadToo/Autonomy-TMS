@@ -10,6 +10,7 @@ from sqlalchemy import func, and_, or_
 from typing import Optional, List
 from datetime import datetime, date
 from pydantic import BaseModel, Field
+import logging
 import uuid
 
 from ...db.session import get_sync_db as get_db
@@ -33,6 +34,16 @@ from .forecast_exceptions_alert_mapper import (
     alert_status_to_legacy as _alert_status_to_legacy,
     alert_to_legacy_dict as _alert_to_legacy_dict,
 )
+# §3.62 workflow-write cutover (2026-05-18): propagates state +
+# acknowledged/resolved timestamps to the mirror Alert row landed by
+# the create-side dual-write in forecast_exception_detector. Best-
+# effort; failure logs and is swallowed so the legacy write isn't
+# blocked.
+from app.services.forecast_exception_alert_sync import (
+    sync_exception_state_to_alert,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/forecast-exceptions", tags=["Forecast Exceptions"])
 
@@ -505,6 +516,17 @@ def acknowledge_exception(
         )
         db.add(comment)
 
+    # §3.62 workflow-write cutover: mirror state into Core Alert.
+    try:
+        sync_exception_state_to_alert(
+            db, exception, actor_user_id=current_user.id
+        )
+    except Exception:
+        logger.exception(
+            "Failed to mirror ForecastException %s ACKNOWLEDGED state to Alert",
+            exception.exception_number,
+        )
+
     db.commit()
     db.refresh(exception)
 
@@ -525,6 +547,16 @@ def start_investigation(
         raise HTTPException(status_code=400, detail=f"Cannot investigate exception in status {exception.status}")
 
     exception.status = "INVESTIGATING"
+
+    # §3.62 workflow-write cutover: mirror INVESTIGATING (→ INSPECTED) to Alert.
+    try:
+        sync_exception_state_to_alert(db, exception)
+    except Exception:
+        logger.exception(
+            "Failed to mirror ForecastException %s INVESTIGATING state to Alert",
+            exception.exception_number,
+        )
+
     db.commit()
     db.refresh(exception)
 
@@ -552,6 +584,15 @@ def resolve_exception(
     exception.forecast_adjustment = data.forecast_adjustment
     exception.root_cause_category = data.root_cause_category
     exception.root_cause_description = data.root_cause_description
+
+    # §3.62 workflow-write cutover: mirror RESOLVED (→ ACTIONED) to Alert.
+    try:
+        sync_exception_state_to_alert(db, exception)
+    except Exception:
+        logger.exception(
+            "Failed to mirror ForecastException %s RESOLVED state to Alert",
+            exception.exception_number,
+        )
 
     db.commit()
     db.refresh(exception)
@@ -582,6 +623,17 @@ def escalate_exception(
     )
     db.add(comment)
 
+    # §3.62 workflow-write cutover: mirror ESCALATED (→ INSPECTED) to Alert.
+    try:
+        sync_exception_state_to_alert(
+            db, exception, actor_user_id=current_user.id
+        )
+    except Exception:
+        logger.exception(
+            "Failed to mirror ForecastException %s ESCALATED state to Alert",
+            exception.exception_number,
+        )
+
     db.commit()
     db.refresh(exception)
 
@@ -601,6 +653,15 @@ def dismiss_exception(
 
     exception.status = "DISMISSED"
     exception.resolution_notes = f"Dismissed: {reason}"
+
+    # §3.62 workflow-write cutover: mirror DISMISSED (→ OVERRIDDEN) to Alert.
+    try:
+        sync_exception_state_to_alert(db, exception)
+    except Exception:
+        logger.exception(
+            "Failed to mirror ForecastException %s DISMISSED state to Alert",
+            exception.exception_number,
+        )
 
     db.commit()
     db.refresh(exception)
