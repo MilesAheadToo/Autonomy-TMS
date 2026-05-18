@@ -1,0 +1,101 @@
+name: soc2-tenant-scope-audit
+
+# Phase 4 forward guardrail per .claude/rules/tenant-scope-fk.md.
+# Runs the SOC II tenant-scope audit in --strict mode against a freshly-
+# migrated test database. Fails if any new table joins a hazard category,
+# RLS is disabled on a tenant-scoped table, or RLS is enabled without a
+# policy attached.
+#
+# Mirror of Autonomy-DP and Autonomy-SCP's audit workflow. Same audit
+# script (`scripts/audits/soc2_tenant_scope_audit.py`) — product-agnostic
+# by design, inspects DB schema directly.
+
+on:
+  pull_request:
+    paths:
+      - 'backend/migrations/versions/**'
+      - 'backend/app/models/**'
+      - 'backend/app/services/**'
+      - 'backend/app/core/**'
+      - 'backend/app/api/**'
+      - 'scripts/audits/**'
+      - '.github/workflows/soc2-tenant-scope-audit.yml'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tms_user
+          POSTGRES_PASSWORD: tms_password
+          POSTGRES_DB: autonomy_tms
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # 3.11 minimum — Core's `azirella_data_model.master.capacity_defaults`
+          # imports `StrEnum` from `enum`, which is stdlib only in 3.11+.
+          # Matches SCP's audit workflow (bumped in SCP #347) and DP's.
+          python-version: '3.11'
+
+      # The default GITHUB_TOKEN cannot read other private repos in the
+      # org; pip install fails on `azirella-data-model @ git+https://
+      # github.com/azirella-ltd/Autonomy-Core.git@<sha>`. Inject a PAT
+      # via git's `insteadOf` so the same HTTPS URL works.
+      #
+      # Required repo secret: AUTONOMY_CORE_READ_TOKEN — fine-grained
+      # PAT with read access to azirella-ltd/Autonomy-Core (Contents:
+      # read). Add at Settings → Secrets and variables → Actions.
+      - name: Configure git for cross-repo dependency on Autonomy-Core
+        env:
+          AUTONOMY_CORE_READ_TOKEN: ${{ secrets.AUTONOMY_CORE_READ_TOKEN }}
+        run: |
+          if [ -z "$AUTONOMY_CORE_READ_TOKEN" ]; then
+            echo "::error::AUTONOMY_CORE_READ_TOKEN secret is not set."
+            echo "::error::Create a fine-grained PAT with read access to"
+            echo "::error::azirella-ltd/Autonomy-Core and add it as a"
+            echo "::error::repo secret named AUTONOMY_CORE_READ_TOKEN."
+            exit 1
+          fi
+          git config --global \
+            url."https://x-access-token:${AUTONOMY_CORE_READ_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          # Install external deps via requirements.txt first (Core
+          # packages over PAT-authenticated git). TMS's own subpackage
+          # `autonomy-tms-heuristics` is NOT in requirements.txt — it
+          # gets installed locally from the working tree, eliminating
+          # the cross-repo fetch + TMS-scope PAT dependency. Same
+          # pattern as DP's audit workflow.
+          pip install -r backend/requirements.txt
+          pip install -e packages/autonomy-tms-heuristics
+
+      - name: Run alembic migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg2://tms_user:tms_password@localhost:5432/autonomy_tms
+        run: |
+          alembic upgrade head
+
+      - name: Run SOC II audit (--strict)
+        env:
+          DATABASE_URL: postgresql+psycopg2://tms_user:tms_password@localhost:5432/autonomy_tms
+        run: |
+          python scripts/audits/soc2_tenant_scope_audit.py --strict
