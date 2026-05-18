@@ -101,7 +101,12 @@ class InvProjection(Base):
     source_update_dttm: Mapped[Optional[datetime]] = mapped_column(DateTime, comment="Source update timestamp")
 
     # Extension: Simulation Integration
-    config_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("supply_chain_configs.id"))
+    # config_id is the canonical scenario-branching mechanism after the
+    # 2026-05-18 §3.80 Cat 2 cleanup. NOT NULL at the DB level per
+    # migration 20260518_inv_projection_config_id_not_null.
+    config_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("supply_chain_configs.id"), nullable=False
+    )
     period_number: Mapped[Optional[int]] = mapped_column(Integer, comment="Simulation round")
 
     # Audit Fields
