@@ -347,10 +347,12 @@ def main() -> int:
         if violations:
             print("\n## STRICT MODE: forward-guardrail violations\n")
             print(f"**{len(violations)} violation(s) — see .claude/rules/tenant-scope-fk.md**\n")
-            for v in sorted(violations)[:50]:
+            # Print all violations — truncating to 50 hides per-table
+            # detail that's needed for batched remediation (§3.80 Cat 3
+            # planning). The audit output is markdown; long lists are
+            # collapsible in the GH Actions UI.
+            for v in sorted(violations):
                 print(f"- {v}")
-            if len(violations) > 50:
-                print(f"- … and {len(violations) - 50} more")
             return 1
         else:
             print("\n## STRICT MODE: PASS — no forward-guardrail violations\n")
