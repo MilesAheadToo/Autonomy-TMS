@@ -90,7 +90,7 @@ matplotlib==3.9.4
 mpmath==1.3.0
 multidict==6.7.0
 networkx==3.2.1
-numpy==1.24.4
+numpy>=1.26,<2.0  # bumped 2026-05-18: azirella-data-model 0.13.0 requires >=1.26 (AD-12 v3 substrate). Capped <2.0 to keep pandas 1.5.3 happy. Matches SCP's pattern.
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
 nvidia-cuda-nvrtc-cu12==12.8.93
