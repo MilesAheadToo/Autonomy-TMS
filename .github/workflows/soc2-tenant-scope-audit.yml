@@ -28,7 +28,11 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # TMS migrations include `CREATE EXTENSION vector` (pgvector for
+        # decision-embedding tables, kb_chunks, etc.). Plain postgres:16
+        # doesn't ship the extension; the pgvector-on-postgres image is
+        # what production uses (CLAUDE.md → autonomy-db / autonomy-kb-db).
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: tms_user
           POSTGRES_PASSWORD: tms_password
