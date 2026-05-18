@@ -1,6 +1,6 @@
 absl-py==2.3.1
 aiofiles==0.7.0
-azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@7250a80#subdirectory=packages/data-model
+azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@03aa884#subdirectory=packages/data-model
 # bumped 2026-05-18: d7900be (2026-05-12) → 03aa884 (current head). The old
 # pin pre-dated the ScenarioUser promotion (Core 1ce100f, 2026-05-13) that
 # TMS's `backend/app/models/participant.py` already imports from
