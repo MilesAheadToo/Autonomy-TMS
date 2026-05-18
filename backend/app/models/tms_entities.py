@@ -225,91 +225,21 @@ class RateType(str, PyEnum):
 # ============================================================================
 # Commodity Entities
 # ============================================================================
+#
+# §3.79 Step 5 Substep 1a (2026-05-18) — Commodity + CommodityHierarchy
+# moved to Core's azirella_data_model.master.commodity. Re-export shim
+# below keeps existing `from app.models.tms_entities import Commodity,
+# CommodityHierarchy` callsites unchanged. Same Cat-A pattern §3.6
+# Phase 1B used for forecast_config / hierarchy_resolver.
+#
+# Table-creation migration stays in TMS's alembic chain for now (Core's
+# data-model is shape, not table-creation). DP-Ship's eventual migration
+# will create the same tables with IF NOT EXISTS guards.
 
-class CommodityHierarchy(Base):
-    """
-    Commodity/freight class hierarchy for transportation
-    TMS Entity: commodity_hierarchy
-    Replaces ProductHierarchy in SC context
-
-    Hierarchy: Class → Subclass → Commodity
-    Example: Dry Goods → Packaged Foods → Canned Vegetables
-    """
-    __tablename__ = "commodity_hierarchy"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(200), nullable=False)
-    description = Column(String(500))
-    parent_id = Column(Integer, ForeignKey("commodity_hierarchy.id", ondelete="SET NULL"))
-    level = Column(Integer, comment="0=Class, 1=Subclass, 2=Commodity")
-    sort_order = Column(Integer)
-    nmfc_class = Column(String(20), comment="National Motor Freight Classification")
-    freight_class = Column(String(20), comment="Freight class (50-500)")
-    is_hazmat = Column(Boolean, default=False)
-    hazmat_class = Column(String(20))
-    is_active = Column(Boolean, default=True)
-
-    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    config_id = Column(Integer, ForeignKey("supply_chain_configs.id", ondelete="CASCADE"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    parent = relationship("CommodityHierarchy", remote_side=[id], backref="children")
-    commodities = relationship("Commodity", back_populates="hierarchy_node")
-
-    __table_args__ = (
-        Index('idx_commodity_hier_tenant', 'tenant_id', 'level'),
-    )
-
-
-class Commodity(Base):
-    """
-    Individual commodity/freight item
-    TMS Entity: commodity
-    Replaces Product in SC context — what is being shipped (not manufactured)
-    """
-    __tablename__ = "commodity"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(100), nullable=False, comment="Commodity code / SKU")
-    description = Column(String(500))
-    hierarchy_id = Column(Integer, ForeignKey("commodity_hierarchy.id", ondelete="SET NULL"))
-    nmfc_class = Column(String(20))
-    freight_class = Column(String(20), comment="Freight class (50-500)")
-    base_uom = Column(String(20), comment="EA, CS, PAL, LB, KG")
-    weight = Column(Double, comment="Unit weight")
-    weight_uom = Column(String(20))
-    volume = Column(Double, comment="Unit volume")
-    volume_uom = Column(String(20))
-    is_hazmat = Column(Boolean, default=False)
-    hazmat_class = Column(String(20))
-    hazmat_un_number = Column(String(20))
-    is_stackable = Column(Boolean, default=True)
-    is_temperature_sensitive = Column(Boolean, default=False)
-    temp_min = Column(Double, comment="Min temp (Fahrenheit)")
-    temp_max = Column(Double, comment="Max temp (Fahrenheit)")
-    value_per_unit = Column(Double, comment="Declared value per unit for insurance")
-    is_active = Column(Boolean, default=True)
-
-    # Source tracking
-    source = Column(String(100))
-    source_event_id = Column(String(100))
-    source_update_dttm = Column(DateTime)
-    external_identifiers = Column(JSON, nullable=True, comment="Typed external IDs: {sap_material, gtin, upc, ...}")
-
-    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    config_id = Column(Integer, ForeignKey("supply_chain_configs.id", ondelete="CASCADE"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    hierarchy_node = relationship("CommodityHierarchy", back_populates="commodities")
-
-    __table_args__ = (
-        UniqueConstraint('tenant_id', 'code', name='uq_commodity_tenant_code'),
-        Index('idx_commodity_lookup', 'tenant_id', 'freight_class'),
-    )
+from azirella_data_model.master.commodity import (  # noqa: F401, E402
+    Commodity,
+    CommodityHierarchy,
+)
 
 
 # ============================================================================
