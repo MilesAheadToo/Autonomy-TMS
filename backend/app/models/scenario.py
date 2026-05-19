@@ -54,13 +54,26 @@ if not hasattr(Scenario, 'current_period'):
 
 
 # ── TMS-specific relationships on Scenario ──────────────────────────────
-
-Scenario.scenario_users = relationship(
-    "ScenarioUser", back_populates="scenario", lazy="selectin"
-)
-# `Scenario.supply_chain_periods` moved to Core (§3.73 Step 2,
-# 2026-05-14) because its target `ScenarioPeriod` is now in
-# `azirella_data_model.simulation.supply_chain`.
+#
+# Only relationships whose target lives TMS-side stay here. Core↔Core
+# back-relations now live in Core itself (§3.73, §3.82).
+#
+# Moved to Core:
+#   §3.73 Step 2 (2026-05-14): `Scenario.supply_chain_periods`
+#       (target `ScenarioPeriod` in `simulation.supply_chain`).
+#   §3.73 Step 3 (2026-05-14): `Scenario.chat_messages`,
+#       `.agent_suggestions`, `.what_if_analyses`
+#       (targets in `simulation.chat`).
+#   §3.73 Step 2b (2026-05-14): `Scenario.function_assignments`.
+#   §3.82 (2026-05-19): `Scenario.scenario_users`,
+#       `ScenarioUserAction.scenario_user` — symmetric Core↔Core pairs
+#       whose plane-side monkey-patch broke Core-only
+#       `configure_mappers()`.
+#
+# Still TMS-local below: `Scenario.users` (depends on TMS-side
+# `user_scenarios` association table; tracked as follow-up to §3.82),
+# `Scenario.supervisor_actions` (TMS-side `SupervisorAction`),
+# `Scenario.agent_configs` (TMS-side `AgentConfig`).
 Scenario.users = relationship(
     "User", secondary="user_scenarios", lazy="selectin"
 )
@@ -69,18 +82,6 @@ Scenario.supervisor_actions = relationship(
 )
 Scenario.agent_configs = relationship(
     "AgentConfig", back_populates="scenario", lazy="selectin"
-)
-# `Scenario.chat_messages` / `.agent_suggestions` / `.what_if_analyses`
-# back-relations live in Core (§3.73 Step 3, 2026-05-14) — targets are
-# `azirella_data_model.simulation.chat`.
-# `Scenario.function_assignments` also moved to Core (§3.73 Step 2b,
-# 2026-05-14).
-
-
-# ── TMS-specific relationships on ScenarioUserAction ────────────────────
-
-ScenarioUserAction.scenario_user = relationship(
-    "ScenarioUser", back_populates="actions", lazy="selectin"
 )
 
 

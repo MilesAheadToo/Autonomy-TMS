@@ -1,12 +1,19 @@
 absl-py==2.3.1
 aiofiles==0.7.0
-azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@73f49ef#subdirectory=packages/data-model
-# bumped 2026-05-18 (fourth time today): 86769e0 → 73f49ef. Picks up
-# §3.49 tranche 3 — DirectiveBroadcastService lifted to Core at
+azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@90b2640#subdirectory=packages/data-model
+# bumped 2026-05-19: 73f49ef → 90b2640. Picks up §3.82 — four
+# Core↔Core back-relations relocated from SCP/TMS scenario.py to
+# Core (Scenario.scenario_users + ScenarioUserAction.scenario_user
+# + Period.scenario_user_actions + ScenarioUserAction.period). TMS's
+# backend/app/models/scenario.py now declares only plane-specific
+# relationships (users, supervisor_actions, agent_configs) alongside
+# this pin bump.
+# Prior bump (86769e0 → 73f49ef) picked up §3.49 tranche 3 —
+# DirectiveBroadcastService lifted to Core at
 # azirella_data_model.powell.directive_broadcast with a new
 # SiteAgentProtocol. TMS's backend/app/services/powell/
 # directive_broadcast_service.py collapsed to a Core re-export shim
-# alongside this pin bump.
+# at that bump.
 # Prior bump (b8b424d → 86769e0) picked up the 3 visibility signal
 # types (LATE_ARRIVAL_DETECTED, DWELL_BREACH_ALERT,
 # GEOFENCE_DEPARTED_EARLY) + VISIBILITY_SIGNALS frozenset in
