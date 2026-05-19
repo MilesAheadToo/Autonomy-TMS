@@ -1,13 +1,20 @@
 absl-py==2.3.1
 aiofiles==0.7.0
-azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@90b2640#subdirectory=packages/data-model
-# bumped 2026-05-19: 73f49ef → 90b2640. Picks up §3.82 — four
+azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@1e8404e#subdirectory=packages/data-model
+# bumped 2026-05-19 (second time today): 90b2640 → 1e8404e. Picks up
+# §3.51 Phase 2 third retrofit — visibility.ETAEstimate band columns
+# renamed from predicted_p10_at/p50_at/p90_at to canonical
+# predicted_p10/p50/p90 + new predicted_producer_tier /
+# predicted_producer_signature columns. The ETAPrediction dataclass
+# in azirella_data_model.visibility.eta_predictor has the same field
+# rename. TMS's live_exception_service.py + test_live_exception_service.py
+# consume the new names alongside this pin bump.
+# Prior bump (73f49ef → 90b2640) picked up §3.82 — four
 # Core↔Core back-relations relocated from SCP/TMS scenario.py to
 # Core (Scenario.scenario_users + ScenarioUserAction.scenario_user
 # + Period.scenario_user_actions + ScenarioUserAction.period). TMS's
 # backend/app/models/scenario.py now declares only plane-specific
-# relationships (users, supervisor_actions, agent_configs) alongside
-# this pin bump.
+# relationships (users, supervisor_actions, agent_configs).
 # Prior bump (86769e0 → 73f49ef) picked up §3.49 tranche 3 —
 # DirectiveBroadcastService lifted to Core at
 # azirella_data_model.powell.directive_broadcast with a new

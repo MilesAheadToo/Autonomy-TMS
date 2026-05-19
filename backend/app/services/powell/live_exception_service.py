@@ -191,9 +191,9 @@ class LiveExceptionService:
         tracked_entity_id: int,
         tenant_id: int,
         promised_at: Optional[datetime],
-        predicted_p50_at: Optional[datetime],
-        predicted_p10_at: Optional[datetime] = None,
-        predicted_p90_at: Optional[datetime] = None,
+        predicted_p50: Optional[datetime],
+        predicted_p10: Optional[datetime] = None,
+        predicted_p90: Optional[datetime] = None,
         predicted_at: Optional[datetime] = None,
         model_name: Optional[str] = None,
     ) -> Optional[ExceptionResult]:
@@ -207,10 +207,10 @@ class LiveExceptionService:
              low-urgency heads-up (capped at automate_threshold).
           4. Otherwise → on-track.
         """
-        if promised_at is None or predicted_p50_at is None:
+        if promised_at is None or predicted_p50 is None:
             return None
 
-        slip_seconds = (predicted_p50_at - promised_at).total_seconds()
+        slip_seconds = (predicted_p50 - promised_at).total_seconds()
 
         if slip_seconds > 0:
             slip_min = slip_seconds / 60.0
@@ -218,7 +218,7 @@ class LiveExceptionService:
                 1.0, max(0.0, slip_min / self.late_arrival_horizon_min)
             )
             reason = (
-                f"ETA P50 ({_fmt(predicted_p50_at)}) exceeds promised "
+                f"ETA P50 ({_fmt(predicted_p50)}) exceeds promised "
                 f"arrival ({_fmt(promised_at)}) by {slip_min:.0f} min."
             )
             return ExceptionResult(
@@ -234,7 +234,7 @@ class LiveExceptionService:
                     "slip_minutes": round(slip_min, 1),
                     "model_name": model_name,
                     "promised_at": _to_iso(promised_at),
-                    "predicted_p50_at": _to_iso(predicted_p50_at),
+                    "predicted_p50": _to_iso(predicted_p50),
                 },
             )
 
@@ -242,15 +242,15 @@ class LiveExceptionService:
         # (slip ≤ 0 → not committed-late, but the lower half of the
         # confidence band is consumed).
         if (
-            predicted_p10_at is not None
-            and predicted_p10_at < promised_at <= predicted_p50_at
+            predicted_p10 is not None
+            and predicted_p10 < promised_at <= predicted_p50
         ):
             band_slack_min = (
-                promised_at - predicted_p10_at
+                promised_at - predicted_p10
             ).total_seconds() / 60.0
             if band_slack_min >= LATE_ARRIVAL_BAND_RISK_THRESHOLD_MIN:
                 lower_band_total_min = (
-                    predicted_p50_at - predicted_p10_at
+                    predicted_p50 - predicted_p10
                 ).total_seconds() / 60.0
                 if lower_band_total_min > 0:
                     consumed_frac = band_slack_min / lower_band_total_min
@@ -263,7 +263,7 @@ class LiveExceptionService:
                 )
                 reason = (
                     f"Promised arrival ({_fmt(promised_at)}) is inside the "
-                    f"[P10={_fmt(predicted_p10_at)}, P50={_fmt(predicted_p50_at)}] "
+                    f"[P10={_fmt(predicted_p10)}, P50={_fmt(predicted_p50)}] "
                     f"band ({band_slack_min:.0f} min from P10) — schedule at risk."
                 )
                 return ExceptionResult(
@@ -280,8 +280,8 @@ class LiveExceptionService:
                         "consumed_band_fraction": round(consumed_frac, 3),
                         "model_name": model_name,
                         "promised_at": _to_iso(promised_at),
-                        "predicted_p10_at": _to_iso(predicted_p10_at),
-                        "predicted_p50_at": _to_iso(predicted_p50_at),
+                        "predicted_p10": _to_iso(predicted_p10),
+                        "predicted_p50": _to_iso(predicted_p50),
                     },
                 )
 
@@ -431,9 +431,9 @@ class LiveExceptionService:
                 ETAEstimate.tracked_entity_id,
                 ETAEstimate.tenant_id,
                 ETAEstimate.promised_at,
-                ETAEstimate.predicted_p50_at,
-                ETAEstimate.predicted_p10_at,
-                ETAEstimate.predicted_p90_at,
+                ETAEstimate.predicted_p50,
+                ETAEstimate.predicted_p10,
+                ETAEstimate.predicted_p90,
                 ETAEstimate.predicted_at,
                 ETAEstimate.model_name,
             )
@@ -449,9 +449,9 @@ class LiveExceptionService:
                 tracked_entity_id=row.tracked_entity_id,
                 tenant_id=row.tenant_id,
                 promised_at=row.promised_at,
-                predicted_p50_at=row.predicted_p50_at,
-                predicted_p10_at=row.predicted_p10_at,
-                predicted_p90_at=row.predicted_p90_at,
+                predicted_p50=row.predicted_p50,
+                predicted_p10=row.predicted_p10,
+                predicted_p90=row.predicted_p90,
                 predicted_at=row.predicted_at,
                 model_name=row.model_name,
             )

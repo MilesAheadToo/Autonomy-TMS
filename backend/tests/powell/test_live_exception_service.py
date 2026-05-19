@@ -115,9 +115,9 @@ class TestLateArrivalCommittedLate:
         result = svc.classify_late_arrival(
             eta_id=1, tracked_entity_id=10, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised - timedelta(minutes=30),
-            predicted_p10_at=promised - timedelta(minutes=60),
-            predicted_p90_at=promised + timedelta(minutes=15),
+            predicted_p50=promised - timedelta(minutes=30),
+            predicted_p10=promised - timedelta(minutes=60),
+            predicted_p90=promised + timedelta(minutes=15),
         )
         assert result is None
 
@@ -127,9 +127,9 @@ class TestLateArrivalCommittedLate:
         result = svc.classify_late_arrival(
             eta_id=2, tracked_entity_id=11, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised + timedelta(minutes=60),
-            predicted_p10_at=promised + timedelta(minutes=20),
-            predicted_p90_at=promised + timedelta(minutes=120),
+            predicted_p50=promised + timedelta(minutes=60),
+            predicted_p10=promised + timedelta(minutes=20),
+            predicted_p90=promised + timedelta(minutes=120),
         )
         assert result is not None
         assert result.exception_type == ExceptionType.LATE_ARRIVAL_DETECTED
@@ -146,9 +146,9 @@ class TestLateArrivalCommittedLate:
         result = svc.classify_late_arrival(
             eta_id=3, tracked_entity_id=12, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised + timedelta(hours=4),
-            predicted_p10_at=promised + timedelta(hours=2),
-            predicted_p90_at=promised + timedelta(hours=6),
+            predicted_p50=promised + timedelta(hours=4),
+            predicted_p10=promised + timedelta(hours=2),
+            predicted_p90=promised + timedelta(hours=6),
         )
         assert result is not None
         # 240 min / 480 min horizon = 0.5 → INFORM band [0.30, 0.65)
@@ -161,9 +161,9 @@ class TestLateArrivalCommittedLate:
         result = svc.classify_late_arrival(
             eta_id=4, tracked_entity_id=13, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised + timedelta(hours=12),
-            predicted_p10_at=promised + timedelta(hours=10),
-            predicted_p90_at=promised + timedelta(hours=14),
+            predicted_p50=promised + timedelta(hours=12),
+            predicted_p10=promised + timedelta(hours=10),
+            predicted_p90=promised + timedelta(hours=14),
         )
         assert result is not None
         # 720 min slip > 480 min horizon → urgency capped at 1.0 → INSPECT
@@ -184,9 +184,9 @@ class TestLateArrivalAtRisk:
         result = svc.classify_late_arrival(
             eta_id=5, tracked_entity_id=14, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised,  # P50 == promised — at-risk edge
-            predicted_p10_at=promised - timedelta(minutes=60),
-            predicted_p90_at=promised + timedelta(minutes=60),
+            predicted_p50=promised,  # P50 == promised — at-risk edge
+            predicted_p10=promised - timedelta(minutes=60),
+            predicted_p90=promised + timedelta(minutes=60),
         )
         assert result is not None
         assert result.exception_type == ExceptionType.LATE_ARRIVAL_DETECTED
@@ -203,9 +203,9 @@ class TestLateArrivalAtRisk:
         result = svc.classify_late_arrival(
             eta_id=6, tracked_entity_id=15, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised + timedelta(seconds=0),  # P50 == promised
-            predicted_p10_at=promised - timedelta(minutes=10),
-            predicted_p90_at=promised + timedelta(minutes=30),
+            predicted_p50=promised + timedelta(seconds=0),  # P50 == promised
+            predicted_p10=promised - timedelta(minutes=10),
+            predicted_p90=promised + timedelta(minutes=30),
         )
         # P50 == promised → slip == 0 → not committed-late.
         # band_slack = 10 min < threshold → no at-risk either.
@@ -218,9 +218,9 @@ class TestLateArrivalAtRisk:
         result = svc.classify_late_arrival(
             eta_id=7, tracked_entity_id=16, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised,
-            predicted_p10_at=promised - timedelta(hours=2),
-            predicted_p90_at=promised + timedelta(hours=2),
+            predicted_p50=promised,
+            predicted_p10=promised - timedelta(hours=2),
+            predicted_p90=promised + timedelta(hours=2),
         )
         assert result is not None
         # consumed_frac == 1.0 → urgency capped at automate_threshold (0.3)
@@ -239,7 +239,7 @@ class TestLateArrivalEdgeCases:
         result = svc.classify_late_arrival(
             eta_id=8, tracked_entity_id=17, tenant_id=100,
             promised_at=None,
-            predicted_p50_at=_now() + timedelta(hours=2),
+            predicted_p50=_now() + timedelta(hours=2),
         )
         assert result is None
 
@@ -248,7 +248,7 @@ class TestLateArrivalEdgeCases:
         result = svc.classify_late_arrival(
             eta_id=9, tracked_entity_id=18, tenant_id=100,
             promised_at=_now() + timedelta(hours=2),
-            predicted_p50_at=None,
+            predicted_p50=None,
         )
         assert result is None
 
@@ -259,9 +259,9 @@ class TestLateArrivalEdgeCases:
         result = svc.classify_late_arrival(
             eta_id=10, tracked_entity_id=19, tenant_id=100,
             promised_at=promised,
-            predicted_p50_at=promised - timedelta(minutes=15),
-            predicted_p10_at=promised - timedelta(minutes=45),
-            predicted_p90_at=promised - timedelta(minutes=5),
+            predicted_p50=promised - timedelta(minutes=15),
+            predicted_p10=promised - timedelta(minutes=45),
+            predicted_p90=promised - timedelta(minutes=5),
         )
         assert result is None
 
