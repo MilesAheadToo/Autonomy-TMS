@@ -9,10 +9,12 @@ and empty equipment repositioning moves.
 
 The output writes into TMS tables only — source SCP rows are read-only.
 
-Produces training-grade data for all 11 TMS TRM behavioral-cloning runs:
+Produces training-grade data for the 10 dispatch-side TMS TRM
+behavioral-cloning runs (LoadVolumeSensing + LaneVolumeForecast
+moved to DP-Ship per §3.79 Substep 3; their training-data overlay
+lives in apps/dp-ship/backend/ now):
   CapacityPromiseState ← lane/date capacity snapshot
   ShipmentTrackingState ← tracking events + ETA drift
-  LoadVolumeSensingState ← rolling lane volumes + forecast bias
   CapacityBufferState ← tender reject rate + demand CV rollups
   ExceptionManagementState ← ShipmentException rows
   FreightProcurementState ← FreightTender waterfall

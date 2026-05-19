@@ -39,25 +39,26 @@ from autonomy_tms_heuristics.library.base import (  # noqa: E402
     ExceptionManagementState,
     FreightProcurementState,
     IntermodalTransferState,
-    LaneVolumeForecastState,
     LoadBuildState,
-    LoadVolumeSensingState,
     ShipmentTrackingState,
 )
 
 
 # Map trm_type → state dataclass for hydration.
+# load_volume_sensing + lane_volume_forecast moved to DP-Ship per
+# §3.79 Substep 3 (2026-05-19). Backtests for those two TRMs now run
+# from apps/dp-ship/backend/app/heuristics/shipment_volume.py against
+# DP-Ship's own historical data set; TMS backtest harness keeps the
+# 10 dispatch-side TRMs only.
 _STATE_CLASSES = {
     "broker_routing": BrokerRoutingState,
     "capacity_buffer": CapacityBufferState,
     "capacity_promise": CapacityPromiseState,
-    "load_volume_sensing": LoadVolumeSensingState,
     "dock_scheduling": DockSchedulingState,
     "equipment_reposition": EquipmentRepositionState,
     "exception_management": ExceptionManagementState,
     "freight_procurement": FreightProcurementState,
     "intermodal_transfer": IntermodalTransferState,
-    "lane_volume_forecast": LaneVolumeForecastState,
     "load_build": LoadBuildState,
     "shipment_tracking": ShipmentTrackingState,
 }

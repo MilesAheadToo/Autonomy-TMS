@@ -69,10 +69,14 @@ def compute_tms_decision(trm_type: str, state: Any) -> TMSHeuristicDecision:
     Returns:
         TMSHeuristicDecision with action, reasoning, and parameters
     """
+    # §3.79 Substep 3 (2026-05-19): load_volume_sensing +
+    # lane_volume_forecast moved to DP-Ship. The dispatch entries are
+    # retained as stubs that raise so callers stuck on an old import
+    # path get a clear error pointing at the new home. Stage E.2
+    # follow-up removes them entirely after one release.
     dispatch_map = {
         "capacity_promise": _compute_capacity_promise,
         "shipment_tracking": _compute_shipment_tracking,
-        "load_volume_sensing": _compute_load_volume_sensing,
         "capacity_buffer": _compute_capacity_buffer,
         "exception_management": _compute_exception_management,
         "freight_procurement": _compute_freight_procurement,
@@ -81,8 +85,13 @@ def compute_tms_decision(trm_type: str, state: Any) -> TMSHeuristicDecision:
         "load_build": _compute_load_build,
         "intermodal_transfer": _compute_intermodal_transfer,
         "equipment_reposition": _compute_equipment_reposition,
-        "lane_volume_forecast": _compute_lane_volume_forecast,
     }
+    if trm_type in ("load_volume_sensing", "lane_volume_forecast"):
+        raise RuntimeError(
+            f"compute_tms_decision: trm_type={trm_type!r} moved to DP-Ship "
+            "per §3.79 Substep 3. Use `compute_shipment_decision` from "
+            "`apps/dp-ship/backend/app/heuristics/shipment_volume` instead."
+        )
 
     func = dispatch_map.get(trm_type)
     if not func:
