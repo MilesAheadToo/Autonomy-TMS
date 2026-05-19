@@ -1,14 +1,19 @@
 """
-Tests for Sprint 5: Coordinated Simulation Runner + Hive Curricula
+Tests for Sprint 5: Coordinated Simulation Runner
 
 Validates that:
-1. CoordinatedSimRunner produces traces with all 11 TRM types
+1. CoordinatedSimRunner produces traces with the configured TRM types
 2. MultiHeadTrace captures per-TRM snapshots and urgency evolution
 3. Cross-head reward computation is correct
 4. EpisodeResult aggregates properly
-5. Hive curricula generate valid data for all 7 TRMs
-6. Hive curricula are registered in CURRICULUM_REGISTRY
-7. generate_hive_traces script structures are valid
+
+Hive curriculum tests were removed when ``hive_curriculum.py`` was
+retired from TMS (§3.49 tranche 4, 2026-05-18) — that file held only
+SCP-domain curriculum classes (MOExecution / ForecastAdjustment /
+ForecastBaseline / etc.) and was fork-leftover from the original
+TMS-SCP fork. Curriculum coverage for the 10 dispatch-side TMS TRMs
+will land alongside their own curriculum classes (no Core lift
+pending — see MIGRATION_REGISTER §3.49 tranche 4).
 """
 
 import pytest
@@ -32,24 +37,6 @@ from app.services.powell.decision_cycle import (
     PhaseResult,
     PHASE_TRM_MAP,
 )
-from app.services.powell.hive_curriculum import (
-    MOExecutionCurriculum,
-    TOExecutionCurriculum,
-    QualityDispositionCurriculum,
-    MaintenanceSchedulingCurriculum,
-    SubcontractingCurriculum,
-    ForecastAdjustmentCurriculum,
-    InventoryBufferCurriculum,
-    HIVE_CURRICULUM_REGISTRY,
-)
-from app.services.powell.trm_curriculum import CURRICULUM_REGISTRY, CurriculumData, SCConfigData, register_hive_curricula
-
-# Ensure hive curricula are registered (handles import order edge cases)
-register_hive_curricula()
-
-
-# Shared SC config for curriculum tests
-_SC_CONFIG = SCConfigData()
 
 
 # ---------------------------------------------------------------------------
@@ -285,91 +272,7 @@ class TestCrossHeadReward:
 
 
 # ---------------------------------------------------------------------------
-# 4. Hive curricula — 7 TRM generators
-# ---------------------------------------------------------------------------
-
-class TestHiveCurricula:
-    """Test all 7 hive curriculum generators."""
-
-    @pytest.fixture(params=[
-        ("mo_execution", MOExecutionCurriculum),
-        ("to_execution", TOExecutionCurriculum),
-        ("quality", QualityDispositionCurriculum),
-        ("maintenance", MaintenanceSchedulingCurriculum),
-        ("subcontracting", SubcontractingCurriculum),
-        ("forecast_adj", ForecastAdjustmentCurriculum),
-        ("inventory_buffer", InventoryBufferCurriculum),
-    ])
-    def curriculum(self, request):
-        name, cls = request.param
-        return name, cls(_SC_CONFIG, seed=42)
-
-    def test_generate_phase1(self, curriculum):
-        name, cur = curriculum
-        data = cur.generate(phase=1, num_samples=100)
-        assert isinstance(data, CurriculumData)
-        assert data.state_vectors.shape[0] == 100
-        assert data.state_vectors.shape[1] == cur.state_dim
-
-    def test_generate_phase2(self, curriculum):
-        name, cur = curriculum
-        data = cur.generate(phase=2, num_samples=50)
-        assert data.state_vectors.shape[0] == 50
-
-    def test_generate_phase3(self, curriculum):
-        name, cur = curriculum
-        data = cur.generate(phase=3, num_samples=50)
-        assert data.state_vectors.shape[0] == 50
-
-    def test_actions_in_valid_range(self, curriculum):
-        name, cur = curriculum
-        data = cur.generate(phase=2, num_samples=200)
-        # All actions should be non-negative integers
-        assert np.all(data.action_discrete >= 0)
-
-    def test_rewards_bounded(self, curriculum):
-        name, cur = curriculum
-        data = cur.generate(phase=3, num_samples=200)
-        assert np.all(data.rewards >= 0.0)
-        assert np.all(data.rewards <= 1.0)
-
-    def test_trm_type_property(self, curriculum):
-        name, cur = curriculum
-        assert cur.trm_type == name
-
-    def test_next_state_vectors_present(self, curriculum):
-        name, cur = curriculum
-        data = cur.generate(phase=1, num_samples=50)
-        assert data.next_state_vectors.shape == data.state_vectors.shape
-
-
-# ---------------------------------------------------------------------------
-# 5. Curriculum registry integration
-# ---------------------------------------------------------------------------
-
-class TestCurriculumRegistryIntegration:
-    """Test that hive curricula are registered in main CURRICULUM_REGISTRY."""
-
-    def test_all_11_trms_in_registry(self):
-        expected = {
-            "atp_executor", "rebalancing", "po_creation", "order_tracking",
-            "mo_execution", "to_execution", "quality", "maintenance",
-            "subcontracting", "forecast_adj", "inventory_buffer",
-        }
-        assert expected.issubset(set(CURRICULUM_REGISTRY.keys()))
-
-    def test_hive_curricula_in_main_registry(self):
-        for name in HIVE_CURRICULUM_REGISTRY:
-            assert name in CURRICULUM_REGISTRY
-            assert CURRICULUM_REGISTRY[name] is HIVE_CURRICULUM_REGISTRY[name]
-
-    def test_original_4_still_present(self):
-        for name in ["atp_executor", "rebalancing", "po_creation", "order_tracking"]:
-            assert name in CURRICULUM_REGISTRY
-
-
-# ---------------------------------------------------------------------------
-# 6. Edge cases
+# 4. Edge cases
 # ---------------------------------------------------------------------------
 
 class TestEdgeCases:
