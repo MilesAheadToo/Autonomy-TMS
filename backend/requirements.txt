@@ -1,14 +1,30 @@
 absl-py==2.3.1
 aiofiles==0.7.0
-azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@1e8404e#subdirectory=packages/data-model
-# bumped 2026-05-19 (second time today): 90b2640 → 1e8404e. Picks up
-# §3.51 Phase 2 third retrofit — visibility.ETAEstimate band columns
-# renamed from predicted_p10_at/p50_at/p90_at to canonical
-# predicted_p10/p50/p90 + new predicted_producer_tier /
-# predicted_producer_signature columns. The ETAPrediction dataclass
-# in azirella_data_model.visibility.eta_predictor has the same field
-# rename. TMS's live_exception_service.py + test_live_exception_service.py
-# consume the new names alongside this pin bump.
+azirella-data-model @ git+https://github.com/azirella-ltd/Autonomy-Core.git@1e676a9#subdirectory=packages/data-model
+# bumped 2026-05-19 (clean-build catch-up): 1e8404e → 1e676a9. Picks
+# up the cumulative Core lifts that landed during the §3.78 sequence
+# today — TMS's plane shims (forecast_exception, consensus_plan)
+# need the canonical ORMs in Core to avoid duplicate-table-definition
+# errors at configure_mappers() time.
+#   - §3.78 capability substrate (azirella_data_model.capabilities/)
+#   - §3.78 Step E forecast_exception ORMs (azirella_data_model.master.
+#     forecast_exception)
+#   - §3.78 Step F consensus_plan ORMs (azirella_data_model.master.
+#     consensus_plan)
+#   - §3.78 follow-up user_scope_service.py lift
+#     (azirella_data_model.tenant.user_scope)
+# TMS's app/models/forecast_exception.py + consensus_plan.py +
+# planning_hierarchy.py collapsed to re-export shims alongside this
+# bump.
+# Prior bump (90b2640 → 1e8404e) picked up §3.51 Phase 2 third
+# retrofit — visibility.ETAEstimate band columns renamed from
+# predicted_p10_at/p50_at/p90_at to canonical predicted_p10/p50/p90
+# + new predicted_producer_tier / predicted_producer_signature
+# columns. The ETAPrediction dataclass in
+# azirella_data_model.visibility.eta_predictor has the same field
+# rename. TMS's live_exception_service.py +
+# test_live_exception_service.py consume the new names alongside
+# that pin bump.
 # Prior bump (73f49ef → 90b2640) picked up §3.82 — four
 # Core↔Core back-relations relocated from SCP/TMS scenario.py to
 # Core (Scenario.scenario_users + ScenarioUserAction.scenario_user

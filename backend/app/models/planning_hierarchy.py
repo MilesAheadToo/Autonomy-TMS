@@ -19,6 +19,7 @@ from azirella_data_model.master.planning_hierarchy import (  # noqa: F401
     TimeBucketConfig,
     PlanningHorizonTemplate,
     AggregatedPlan,
+    DEFAULT_PLANNING_TEMPLATES,
 )
 
 
@@ -33,4 +34,5 @@ __all__ = [
     "TimeBucketConfig",
     "PlanningHorizonTemplate",
     "AggregatedPlan",
+    "DEFAULT_PLANNING_TEMPLATES",
 ]

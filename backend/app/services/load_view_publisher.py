@@ -34,7 +34,8 @@ from typing import Dict, Optional, Tuple
 from sqlalchemy import event
 from sqlalchemy.orm import Session as SyncSession
 
-from app.models.tms_entities import Load, TransportationLane
+from app.models.tms_entities import Load
+from azirella_data_model.master import TransportationLane
 
 logger = logging.getLogger(__name__)
 
