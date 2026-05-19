@@ -94,7 +94,7 @@ Apply Rule 1 (cross-product) or Rule 2 (substrate) on every change.
 - [Autonomy-Core/docs/CONSUMER_ADOPTION_LOG.md](../Autonomy-Core/docs/CONSUMER_ADOPTION_LOG.md) — Core changes TMS must pick up
 - [Autonomy-Core/docs/SPRINT_1_EXECUTION.md](../Autonomy-Core/docs/SPRINT_1_EXECUTION.md) — current partition sprint (2026-04-21 → 2026-06-01)
 - [Autonomy-Core/docs/TMS_ADOPTION_GUIDE_20260420.md](../Autonomy-Core/docs/adoption/TMS_ADOPTION_GUIDE_20260420.md) — **directional alert. Read before next commit.** Contains STOP + PREPARE lists.
-- [Autonomy-DP/CLAUDE.md](../Autonomy-DP/CLAUDE.md) — sibling product (Demand Planning). TMS lane-volume forecaster reads DP via MCP at `DP_MCP_URL=http://msi-stealth.local:8290` (the cross-plane rule applies — never direct DB). **Clone `Autonomy-DP` next to `Autonomy-TMS` on every dev box** — see `CONSUMER_ADOPTION_LOG.md` 2026-04-30 entry "Clone `Autonomy-DP` on every dev box."
+- [Autonomy-DP/CLAUDE.md](../Autonomy-DP/CLAUDE.md) — sibling product (Demand Planning). DP-Ship now **produces** the canonical `lane_volume_plan` (per §3.79 Substep 3, 2026-05-19) — TMS L3 forecast stage was retired and TMS L4 (movement plan + balancer) reads `lane_volume_plan` directly. The earlier MCP-callout pattern at `DP_MCP_URL=http://msi-stealth.local:8290` is retained for ad-hoc DP queries but is no longer on the forecast critical path. **Clone `Autonomy-DP` next to `Autonomy-TMS` on every dev box** — see `CONSUMER_ADOPTION_LOG.md` 2026-04-30 entry "Clone `Autonomy-DP` on every dev box."
 
 ## Target architecture (2026-04-10)
 
@@ -249,10 +249,13 @@ Digital Twin, Causal AI.
 - **L4 Strategic** — S&OP GraphSAGE → carrier portfolio, lane strategy, mode mix (weekly)
 - **L3 Tactical** — Network tGNN → inter-facility directives, priority allocations (daily)
 - **L2 Operational** — Site tGNN → intra-facility cross-TRM coordination, always-on
-- **L1 Execution** — 11 TRMs (<10ms): CapacityPromise, EquipmentReposition,
-  FreightProcurement, ShipmentTracking, LoadBuild, IntermodalTransfer,
-  ExceptionManagement, DockScheduling, BrokerRouting, DemandSensing,
+- **L1 Execution** — 10 dispatch-side TRMs (<10ms): CapacityPromise,
+  EquipmentReposition, FreightProcurement, ShipmentTracking, LoadBuild,
+  IntermodalTransfer, ExceptionManagement, DockScheduling, BrokerRouting,
   CapacityBuffer. See [trm-mapping.md](.claude/rules/trm-mapping.md).
+  Lane-volume / shipping-volume forecasting moved to DP-Ship per §3.79
+  (2026-05-19); the canonical `lane_volume_plan` is produced upstream
+  and consumed by TMS L4 movement + balancer.
 - **AAP** — cross-authority agent negotiation (seconds–minutes)
 - **Escalation Arbiter** — persistent drift detection routes up
 
