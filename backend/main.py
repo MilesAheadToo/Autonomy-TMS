@@ -86,6 +86,13 @@ from app.services.agents import (
 )
 from app.services.mixed_scenario_service import MixedScenarioService
 from app.services.llm_payload import build_llm_decision_payload
+# §3.79 Substep 2 Stage C (2026-05-19): side-effect import — registers
+# the Load → LoadView publisher SQLAlchemy event listener so DP-Ship's
+# cross-plane velocity-feature reads see Load INSERT/UPDATE rows.
+# emit_load_view_if_live() short-circuits when DP-Ship isn't licensed
+# for the tenant; zero cost for non-DP-Ship tenants beyond a registry
+# lookup per Load write.
+import app.services.load_view_publisher  # noqa: F401
 from app.core.demand_patterns import (
     DemandGenerator,
     DEFAULT_DEMAND_PATTERN,
