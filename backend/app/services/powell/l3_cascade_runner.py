@@ -324,68 +324,45 @@ class L3CascadeRunner:
         forecast_plan_version: str,
         cascade_run_id: str,
     ) -> StageResult:
-        """Stage 0: build LaneForecastInputs from observed shipments
-        and publish LaneVolumePlan rows via TacticalForecastService.
+        """Stage 0: verify LaneVolumePlan rows are present.
 
-        Threads the lifecycle reactor (DP→TMS A2A bridge) so NPI/EOL
-        adjustments published in DP propagate into lane volumes
-        before the Movement Planner sees them. Reactor failures are
-        already handled inside publish_forecast (logged WARNING and
-        the run proceeds without overlays); this stage's try/except
-        only catches catastrophic failures (e.g. SQL error during
-        the forecast publish itself).
+        §3.79 Substep 3 Stage F-2 (2026-05-19): L3 forecast publish
+        moved out of TMS into DP-Ship's TacticalForecastService.
+        DP-Ship's cron publishes lane_volume_plan rows on its own
+        schedule; this stage now just verifies the rows exist before
+        the Movement Planner runs.
 
-        Empty-history tenants (no shipment data) get OK status with
-        rows_written=0 — not a failure. The Movement Planner stage
-        will produce an empty plan in that case.
+        Empty result is OK status with rows=0 — the Movement Planner
+        will produce an empty plan and surface "no forecast" via the
+        normal channel. A SQL error during the read raises FAILED.
         """
         try:
-            from app.services.powell.lane_forecast_input_builder import (
-                LaneForecastInputBuilder,
-            )
-            from app.services.powell.lifecycle_reactor_factory import (
-                make_lifecycle_reactor,
-            )
-            from app.services.powell.tactical_forecast_service import (
-                TacticalForecastService,
-            )
+            from azirella_data_model.transport_plan import LaneVolumePlan
+            from sqlalchemy import func, select
 
-            builder = LaneForecastInputBuilder(period_days=period_days)
-            inputs = builder.build_inputs(
-                self.db,
-                tenant_id=tenant_id,
-                config_id=config_id,
-                period_start=period_start,
-            )
+            row_count = self.db.execute(
+                select(func.count(LaneVolumePlan.id)).where(
+                    LaneVolumePlan.tenant_id == tenant_id,
+                    LaneVolumePlan.config_id == config_id,
+                    LaneVolumePlan.period_start == period_start,
+                    LaneVolumePlan.plan_version == forecast_plan_version,
+                )
+            ).scalar() or 0
 
-            reactor = make_lifecycle_reactor(
-                self.db, tenant_id=tenant_id, config_id=config_id,
-            )
-
-            svc = TacticalForecastService(self.db)
-            result = svc.publish_forecast(
-                tenant_id=tenant_id,
-                config_id=config_id,
-                inputs=inputs,
-                scenario_id=scenario_id,
-                plan_version=forecast_plan_version,
-                lifecycle_reactor=reactor,
-            )
-            self.db.commit()
             return StageResult(
                 stage="forecast", status="OK",
-                plan_id=None,  # publish_forecast writes many rows, not one plan
+                plan_id=None,
                 summary={
-                    "lanes_evaluated": len(inputs),
-                    "rows_written": result.rows_written,
-                    "skipped_deferred": result.skipped_deferred,
-                    "lifecycle_reactor_active": reactor is not None,
+                    "rows_written": 0,  # this stage no longer writes
+                    "rows_present": row_count,
+                    "produced_by": "dp-ship",  # informational
+                    "lifecycle_reactor_active": False,  # DP-Ship owns this now
                 },
             )
         except Exception as exc:
             self.db.rollback()
             logger.exception(
-                "L3 cascade — Tactical Forecast failed "
+                "L3 cascade — LaneVolumePlan presence-check failed "
                 "(cascade_run_id=%s tenant=%s period=%s)",
                 cascade_run_id, tenant_id, period_start,
             )
