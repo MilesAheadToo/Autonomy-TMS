@@ -123,14 +123,16 @@ def load_bc_checkpoint(
         return None
 
     try:
-        # Import lazily — TRMClassifier lives in scripts/pretraining/, which
-        # is importable from /app in the container but not from a non-Docker
-        # shell unless PYTHONPATH is set.
-        from scripts.pretraining.train_tms_trms import TRMClassifier
+        # Canonical location since 2026-05-20 — ``app.models.trm.tms_trm_classifier``.
+        # The class used to live inside the BC training script at
+        # ``scripts/pretraining/train_tms_trms.py``; that file now re-exports
+        # from the canonical location so offline training scripts keep
+        # working without breaking inference's import path.
+        from app.models.trm.tms_trm_classifier import TRMClassifier
     except Exception as e:
         logger.error(
-            "%s: cannot import TRMClassifier (scripts.pretraining.train_tms_trms): %s — "
-            "heuristic teacher",
+            "%s: cannot import TRMClassifier "
+            "(app.models.trm.tms_trm_classifier): %s — heuristic teacher",
             trm_type, e,
         )
         return None

@@ -44,13 +44,15 @@ from torch.utils.data import DataLoader, TensorDataset
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("train_tms_trms")
 
-# Action name → index mapping (must match generate_tms_corpus.py)
-ACTION_NAMES = {
-    "ACCEPT": 0, "REJECT": 1, "DEFER": 2, "ESCALATE": 3,
-    "MODIFY": 4, "RETENDER": 5, "REROUTE": 6, "CONSOLIDATE": 7,
-    "SPLIT": 8, "REPOSITION": 9, "HOLD": 10,
-}
-NUM_ACTIONS = len(ACTION_NAMES)
+# Action vocabulary + classifier moved to ``app.models.trm.tms_trm_classifier``
+# on 2026-05-20 so inference code (bc_checkpoint_loader) can import without
+# the ``scripts.pretraining.*`` PYTHONPATH hack. Re-exported here so this
+# training script keeps working unchanged.
+from app.models.trm.tms_trm_classifier import (
+    ACTION_NAMES,
+    NUM_ACTIONS,
+    TRMClassifier,
+)
 
 ALL_TRMS = [
     "capacity_promise", "shipment_tracking", "load_volume_sensing",
@@ -65,30 +67,9 @@ ALL_TRMS = [
 # Model
 # ============================================================================
 
-class TRMClassifier(nn.Module):
-    """
-    Simple MLP for discrete TRM action classification.
-
-    Input: state feature vector (float32)
-    Output: logits over NUM_ACTIONS classes
-    """
-    def __init__(self, input_dim: int, hidden_dims: Tuple[int, ...] = (128, 64),
-                 dropout: float = 0.2):
-        super().__init__()
-        layers = []
-        prev = input_dim
-        for h in hidden_dims:
-            layers.extend([
-                nn.Linear(prev, h),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            ])
-            prev = h
-        layers.append(nn.Linear(prev, NUM_ACTIONS))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+# TRMClassifier moved to ``app.models.trm.tms_trm_classifier`` (re-export
+# above); definition removed from this script to keep one canonical
+# location.
 
 
 # ============================================================================
